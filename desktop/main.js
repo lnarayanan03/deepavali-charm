@@ -2,13 +2,15 @@
 // window across the screen with the lamp hanging from the top edge. Only the lamp
 // itself catches the mouse; everything else clicks straight through to your apps.
 
-const {app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage} = require('electron');
+const {app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, shell} = require('electron');
 const fs = require('fs');
 const path = require('path');
 
 const testDir = (process.argv.find(a => a.startsWith('--test=')) || '').slice(7);
 const iconOut = (process.argv.find(a => a.startsWith('--make-icon=')) || '').slice(12);
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
+// your own voice clips for the Dragon Ball show (goku-kamehameha.wav and friends)
+const voicesDir = () => path.join(app.getPath('userData'), 'voices');
 
 let win = null;
 let tray = null;
@@ -72,6 +74,11 @@ function createTray() {
     tray.setContextMenu(Menu.buildFromTemplate([
         {label: 'Shower petals', click: () => win.webContents.send('command', 'shower')},
         {label: 'Light crackers', click: () => win.webContents.send('command', 'crackers')},
+        {label: 'Summon the dragon', click: () => win.webContents.send('command', 'dragon')},
+        {label: 'Open voices folder', click: () => {
+            fs.mkdirSync(voicesDir(), {recursive: true});
+            shell.openPath(voicesDir());
+        }},
         {label: 'Ring the bell', click: () => win.webContents.send('command', 'chime')},
         {label: 'Reset chain length', click: () => win.webContents.send('command', 'reset')},
         {label: 'Sound', type: 'checkbox', checked: loadSettings().sound !== false,
@@ -85,6 +92,22 @@ function createTray() {
 
 ipcMain.on('interactive', (_e, on) => {
     win?.setIgnoreMouseEvents(!on, {forward: true});
+});
+// voice clips you've added, as data URLs; in the app's own voices/ folder too, for development
+ipcMain.handle('load-voices', () => {
+    const out = {};
+    for (const dir of [path.join(__dirname, 'voices'), voicesDir()]) {
+        try {
+            for (const f of fs.readdirSync(dir)) {
+                const m = f.match(/^(goku-[a-z]+)\.(wav|mp3|ogg)$/);
+                if (m) {
+                    const type = m[2] === 'mp3' ? 'mpeg' : m[2];
+                    out[m[1]] = `data:audio/${type};base64,${fs.readFileSync(path.join(dir, f)).toString('base64')}`;
+                }
+            }
+        } catch {}
+    }
+    return out;
 });
 // test runs start from the defaults and never touch the user's saved settings
 ipcMain.handle('load-settings', () => (testDir ? {} : loadSettings()));

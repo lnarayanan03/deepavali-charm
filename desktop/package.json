@@ -2,7 +2,7 @@
   "name": "deepavali-charm",
   "productName": "Deepavali Charm",
   "version": "2.0.0",
-  "description": "A brass hanging lamp with five oil flames on a marigold garland that hangs from the top of your screen.",
+  "description": "A brass hanging lamp with five oil flames on a marigold garland that hangs from the top of your screen, and seven dragon balls to gather.",
   "main": "main.js",
   "author": "Lakshmi Narayanan Ranganatha",
   "license": "UNLICENSED",
@@ -25,6 +25,7 @@
       "renderer.js",
       "cairo-canvas.js",
       "draw.js",
+      "dragon.js",
       "sounds/**",
       "build/icon.png"
     ],

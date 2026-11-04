@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
-fs.copyFileSync(path.join(root, 'draw.js'), path.join(__dirname, 'draw.js'));
+for (const f of ['draw.js', 'dragon.js'])
+    fs.copyFileSync(path.join(root, f), path.join(__dirname, f));
 // start the sounds afresh so renamed or removed ones don't linger
 fs.rmSync(path.join(__dirname, 'sounds'), {recursive: true, force: true});
 fs.mkdirSync(path.join(__dirname, 'sounds'), {recursive: true});

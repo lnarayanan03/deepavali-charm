@@ -9,9 +9,11 @@ import {
     isBack, drawOilDrop, Spill, spoutWorld, dropStart, DROP_GRAVITY, Sounds, Lights, HOLD_MS,
     drawSky, Crackers, DOUBLE_MS,
 } from './draw.js';
+import {useCairo as useDragonCairo, DragonBalls, paintBall, VOICES} from './dragon.js';
 import {CanvasCairo, wrap} from './cairo-canvas.js';
 
 useCairo(CanvasCairo);
+useDragonCairo(CanvasCairo);
 
 const api = window.charm;
 const params = new URLSearchParams(location.search);
@@ -59,13 +61,24 @@ class Sprite {
 
 let soundOn = true;
 const sounds = {};
+let voices = {};   // your own voice clips, as data URLs, by name
 function playSound(name) {
     if (params.get('test'))
         api.test.log(`sound ${name}`);
     if (!soundOn)
         return;
+    let src = `sounds/${name}.wav`;
+    if (name in VOICES) {
+        // your own clip if you've added one, otherwise a stand-in sound
+        if (voices[name])
+            src = voices[name];
+        else if (VOICES[name])
+            src = `sounds/${VOICES[name]}.wav`;
+        else
+            return;
+    }
     // the files carry their own gentle levels; play them as they are
-    sounds[name] ??= new Audio(`sounds/${name}.wav`);
+    sounds[name] ??= new Audio(src);
     const a = sounds[name].cloneNode();
     a.volume = 0.9;
     a.play().catch(() => {});
@@ -105,6 +118,7 @@ const flames = WICKS.map(([ang, fw, fh]) => {
 });
 const lights = new Lights(flames.map(f => f.tx), playSound);
 const crackers = new Crackers(playSound);
+const dragon = new DragonBalls(playSound);
 // the whole-screen layer for the gust and the crackers
 const sky = {
     get W() {
@@ -117,6 +131,7 @@ const sky = {
         return {...lights.gust, y: lampCenter()[1] - 14 * S, s: S};
     },
     crackers,
+    dragon,
 };
 // relighting: a rocket bursts over the dark lamp and its sparks land on the wicks
 crackers.lamp = () => {
@@ -171,6 +186,8 @@ function resize() {
     setLen(clamp(st.len, MIN_LEN, maxLen()));
     for (const sp of [glow, drop, lampBack, lampFront, garland, hook, ...flames.map(f => f.sprite)])
         sp.dirty = true;
+    dragon.avoid = {x: anchor()[0], w: 130 * S};
+    dragon.screen(view.width, view.height, S, performance.now() / 1000);
 }
 
 // ---------- physics ----------
@@ -381,7 +398,15 @@ function render() {
     hook.draw(ctx, ax - 12 * S, ay - 3 * S);
 
     // the gust sweeps the whole screen, level with the flames near the lamp
-    if (lights.wind > 0 || crackers.active)
+    // the seven balls, lying about the screen
+    if (dragon.resting) {
+        const cr = wrap(ctx);
+        for (const b of dragon.balls) {
+            if (!b.hidden)
+                paintBall(cr, b.x, b.y, dragon.radius, b.stars, b.lit, 0, b.stone);
+        }
+    }
+    if (lights.wind > 0 || crackers.active || dragon.showing)
         drawSky(wrap(ctx), view.width, view.height, sky);
 
     for (const o of st.oil) {
@@ -420,6 +445,7 @@ function frame(ms) {
     stepFlames(now, dt, omega);
     stepPetals(dt);
     crackers.tick(now, dt);
+    dragon.tick(now, dt);
     stepOil(now, dt, omega);
     sfx.tick(now, st.theta, omega);
     render();
@@ -439,6 +465,8 @@ function breeze() {
 
 // what's under the pointer: 'hook', 'charm' or null
 function hitTest(x, y) {
+    if (dragon.hit(x, y) >= 0)
+        return 'ball';
     const [ax, ay] = anchor();
     if (Math.abs(x - ax) < 14 * S && y >= ay - 4 * S && y <= ay + 14 * S)
         return 'hook';
@@ -464,7 +492,7 @@ function setInteractive(on) {
 
 function hover(x, y) {
     const what = hitTest(x, y);
-    canvas.style.cursor = what === 'hook' ? 'ew-resize' : what ? 'pointer' : 'default';
+    canvas.style.cursor = what === 'hook' ? 'ew-resize' : what === 'ball' ? 'grab' : what ? 'pointer' : 'default';
     setInteractive(!!what);
 }
 
@@ -481,8 +509,14 @@ canvas.addEventListener('pointerdown', e => {
     const what = hitTest(e.clientX, e.clientY);
     if (!what)
         return;
-    const [ax, ay] = anchor();
     canvas.setPointerCapture(e.pointerId);
+    if (what === 'ball') {
+        dragon.grab(dragon.hit(e.clientX, e.clientY), e.clientX, e.clientY);
+        st.drag = {what};
+        canvas.style.cursor = 'grabbing';
+        return;
+    }
+    const [ax, ay] = anchor();
     st.lenV = 0;
     st.drag = {
         what, x0: e.clientX, y0: e.clientY, moved: false,
@@ -512,6 +546,10 @@ canvas.addEventListener('pointermove', e => {
         return;
     }
     const x = e.clientX, y = e.clientY;
+    if (d.what === 'ball') {
+        dragon.drag(x, y);
+        return;
+    }
     if (!d.moved && Math.hypot(x - d.x0, y - d.y0) > CLICK_SLOP) {
         d.moved = true;
         // mostly up/down stretches the chain; otherwise it's a swing
@@ -553,6 +591,11 @@ function release(e) {
     st.drag = null;
     cancelHold();
     const now = performance.now() / 1000;
+    if (d.what === 'ball') {
+        dragon.drop(now);
+        hover(e.clientX, e.clientY);
+        return;
+    }
     if (d.what === 'charm') {
         if (d.moved) {
             // a stale velocity (pointer held still) shouldn't fling it
@@ -606,6 +649,8 @@ api.onCommand(c => {
         sfx.shower(now);
     } else if (c === 'crackers') {
         crackersUp();
+    } else if (c === 'dragon') {
+        dragon.summon(now);
     } else if (c === 'chime') {
         sfx.ringBells(now);
         st.omega += rand(0.6, 1) * (Math.random() < 0.5 ? -1 : 1);
@@ -634,6 +679,7 @@ if (typeof cfg.anchor === 'number' && cfg.anchor >= 0 && cfg.anchor <= 1)
 if (typeof cfg.length === 'number' && cfg.length >= MIN_LEN)
     st.restLen = cfg.length;
 soundOn = cfg.sound !== false;
+voices = await api.loadVoices();
 setLen(st.restLen);
 resize();
 
@@ -825,25 +871,50 @@ function runTest() {
         t.log(`crackers_mid: rockets=${crackers.rockets.length} queued=${crackers.queue.length} sparks=${crackers.sparks.length}`);
         shot('crackers_mid');
     });
-    at(35.6, () => t.log(`crackers_done: active=${crackers.active}`));
+    at(34.8, () => {
+        t.log(`crackers_words: words=${crackers.words.length}`);
+        shot('crackers_words');
+    });
+    at(38.6, () => t.log(`crackers_done: active=${crackers.active}`));
     // blow it out again, then double-click while it's dark: the finale relights it
-    at(36.0, grabLamp);
-    at(36.1, down);
-    at(37.0, up);
-    at(40.4, () => log('dark_again'));
-    at(40.6, down);
-    at(40.66, up);
-    at(40.76, () => ev('mouseDown', {button: 'left', clickCount: 2}));
-    at(40.82, () => ev('mouseUp', {button: 'left', clickCount: 2}));
-    at(43.6, () => {
+    at(39.5, grabLamp);
+    at(39.6, down);
+    at(40.5, up);
+    at(43.9, () => log('dark_again'));
+    at(44.1, down);
+    at(44.16, up);
+    at(44.26, () => ev('mouseDown', {button: 'left', clickCount: 2}));
+    at(44.32, () => ev('mouseUp', {button: 'left', clickCount: 2}));
+    at(47.1, () => {
         t.log(`dark_show: queued=${crackers.queue.length} relighting=${crackers.relighting} lights=${lights.state}`);
         shot('dark_show');
     });
-    at(51.5, () => {
+    at(55.0, () => {
         log('relit_by_finale');
         shot('relit_by_finale');
     });
-    at(51.7, () => t.done());
+    // dragon balls: summoned from the tray, then the stones and their waking
+    const dlog = tag => t.log(`${tag}: dragon=${dragon.state} stone=${dragon.balls[0].stone}`);
+    at(55.4, () => {
+        dlog('balls');
+        shot('balls');
+        dragon.summon(performance.now() / 1000);
+    });
+    for (const [dt, name] of [[2.6, 'db_pillar'], [5.8, 'db_stare'], [11.6, 'db_ssj'], [15.0, 'db_fire'], [17.2, 'db_catch'], [19.6, 'db_salute']])
+        at(55.4 + dt, () => {
+            dlog(name);
+            shot(name);
+        });
+    at(55.4 + 24.5, () => {
+        dlog('stones');
+        shot('stones');
+        dragon.until = performance.now() / 1000;
+    });
+    at(55.4 + 26.8, () => {
+        t.log(`awake: dragon=${dragon.state} stone=${dragon.balls[0].stone} hit=${dragon.hit(dragon.balls[0].x, dragon.balls[0].y)}`);
+        shot('awake');
+    });
+    at(55.4 + 27.0, () => t.done());
 
     const t0 = performance.now() / 1000;
     let i = 0;

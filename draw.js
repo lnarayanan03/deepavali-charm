@@ -799,18 +799,72 @@ export function drawGust(cr, W, H, g) {
     cr.restore();
 }
 
-// soft colours, a few to a burst; warm ones most of the time
+// bright festival colours, a few to a burst; warm ones most of the time
 const BURSTS = [
-    ['#ffd27a', '#ffe9b8', '#ffb347'],
-    ['#ffa53a', '#ffd38a', '#ff8c5a'],
-    ['#ff9fb2', '#ffd6df', '#ffc08a'],
-    ['#a8e6cf', '#e4fff4', '#ffd27a'],
-    ['#c7b8ff', '#efe9ff', '#ffc6e0'],
+    ['#ffd27a', '#fff1c9', '#ffb347'],
+    ['#ff9a2e', '#ffe0a0', '#ff6a3a'],
+    ['#ff6f91', '#ffd6df', '#ffb35a'],
+    ['#5ff0b0', '#e4fff4', '#ffd27a'],
+    ['#a98bff', '#efe9ff', '#ff8fcf'],
+    ['#ff4a4a', '#ffd0a0', '#ffe66a'],
+    ['#6ad1ff', '#e6f8ff', '#c9a6ff'],
 ];
+const TEXT_COLS = ['#ffe9a8', '#ffd060', '#ffb03a', '#ff8a5a', '#ff9fc0'];
 export const DOUBLE_MS = 300;   // a second click within this long is a double-click
+export const SHOW_S = 10;       // a crackers show, start to last fading spark
+const TEXT_S = 4.9;             // the closing rocket: climb, write the words, hold, fade
+const TEXT_HOLD = 1.8;          // how long "Happy Diwali" hangs in the sky
 
-// Double-click the lamp: a few small rockets rise from the bottom of the screen and
-// open into soft blooms of sparks that drift down and fade. Kept small and gentle.
+// a little stroke font, just the letters of "Happy Diwali". Units: height 1, y down.
+const arcPts = (cx, cy, rx, ry, a0, a1, n = 8) =>
+    Array.from({length: n + 1}, (_, i) => {
+        const a = a0 + ((a1 - a0) * i) / n;
+        return [cx + rx * Math.cos(a), cy + ry * Math.sin(a)];
+    });
+const GLYPHS = {
+    H: [0.62, [[[0, 0], [0, 1]], [[0.62, 0], [0.62, 1]], [[0, 0.5], [0.62, 0.5]]]],
+    a: [0.56, [[...arcPts(0.28, 0.69, 0.28, 0.31, -0.1, Math.PI * 2 - 0.1, 14)], [[0.56, 0.38], [0.56, 1]]]],
+    p: [0.56, [[[0, 0.38], [0, 1.32]], [...arcPts(0.28, 0.69, 0.28, 0.31, Math.PI, Math.PI * 3, 14)]]],
+    y: [0.56, [[[0, 0.38], [0.28, 0.98]], [[0.56, 0.38], [0.24, 1.18], [0.1, 1.32]]]],
+    D: [0.64, [[[0, 0], [0, 1]], [[0, 0], [0.2, 0], ...arcPts(0.2, 0.5, 0.44, 0.5, -Math.PI / 2, Math.PI / 2, 12), [0, 1]]]],
+    i: [0.14, [[[0.07, 0.42], [0.07, 1]], [[0.07, 0.18], [0.07, 0.2]]]],
+    w: [0.8, [[[0, 0.38], [0.2, 1], [0.4, 0.5], [0.6, 1], [0.8, 0.38]]]],
+    l: [0.14, [[[0.07, 0], [0.07, 1]]]],
+    ' ': [0.42, []],
+};
+const GAP = 0.2;
+
+// dots along the strokes of `text`, centred on (0, 0), one every `step` (units)
+function textDots(text, step) {
+    const width = [...text].reduce((w, c) => w + GLYPHS[c][0] + GAP, -GAP);
+    const dots = [];
+    let x = -width / 2;
+    for (const c of text) {
+        const [gw, strokes] = GLYPHS[c];
+        for (const st of strokes) {
+            if (st.length === 2 && Math.hypot(st[1][0] - st[0][0], st[1][1] - st[0][1]) < 0.05) {
+                dots.push([x + st[0][0], st[0][1] - 0.5, true]);   // the dot on an i
+                continue;
+            }
+            let carry = 0;
+            for (let k = 1; k < st.length; k++) {
+                const [x0, y0] = st[k - 1], [x1, y1] = st[k];
+                const len = Math.hypot(x1 - x0, y1 - y0);
+                let d = carry;
+                for (; d < len; d += step)
+                    dots.push([x + x0 + ((x1 - x0) * d) / len, y0 + ((y1 - y0) * d) / len - 0.5]);
+                carry = d - len;
+            }
+            const last = st[st.length - 1];
+            dots.push([x + last[0], last[1] - 0.5]);
+        }
+        x += gw + GAP;
+    }
+    return {dots, width};
+}
+
+// Double-click the lamp: a 10 s show of big, bright rockets across the sky, closing
+// with one that bursts into the words "Happy Diwali" written in sparks.
 // A relight rocket bursts just above the lamp instead and drops one glowing spark onto
 // each wick; the wick catches when its spark lands.
 // Positions are screen px; `play(name)` plays a sound. For relighting, set
@@ -823,13 +877,15 @@ export class Crackers {
         this.sparks = [];
         this.glows = [];
         this.seeds = [];
+        this.words = [];     // the sparks spelling "Happy Diwali"
+        this.flash = 0;      // the whole sky lights up a little on a big burst
         this.lamp = null;
         this.onWick = null;
     }
 
     get active() {
         return this.queue.length + this.rockets.length + this.sparks.length + this.glows.length +
-            this.seeds.length > 0;
+            this.seeds.length + this.words.length > 0 || this.flash > 0;
     }
 
     // a relight rocket is on its way (queued, climbing, or its sparks still falling)
@@ -857,31 +913,31 @@ export class Crackers {
     }
 
     // W x H: the screen; s: scale. Returns false while a show is still going up.
-    // relight: the lamp is dark, so the finale's last rocket lights it again
+    // relight: the lamp is dark, so the last of the big rockets lights it again
     launch(now, W, H, s, relight = false) {
-        if (this.queue.length || this.rockets.length)
+        if (this.queue.length || this.rockets.length || this.words.length)
             return false;
         this._screen(W, H, s);
-        // the whole show lasts 5-8 s: rockets go up for all but the last ~3 s,
-        // which the final ones need to climb, open and fade
-        const show = rand(5, 8);
-        const window = show - 2.9;
-        const n = 6 + Math.round(window * 1.6);
+        // rockets go up for the first ~5 s; the closing word rocket needs the rest
+        const window = SHOW_S - TEXT_S;
+        const n = 14 + Math.round(window * 2.4);
         // spread them across the screen, in a random order
-        const xs = Array.from({length: n}, (_, i) => (i + 0.5) / n + rand(-0.05, 0.05));
+        const xs = Array.from({length: n}, (_, i) => (i + 0.5) / n + rand(-0.04, 0.04));
         xs.sort(() => Math.random() - 0.5);
-        // launch times scattered over the window, the last three close together as a finale
-        const ats = [0, ...Array.from({length: n - 4}, () => rand(0, window * 0.85)),
-            window * 0.88, window * 0.94, window].sort((p, q) => p - q);
-        xs.forEach((fx, i) => this.queue.push({at: now + ats[i], fx: clamp(fx, 0.06, 0.94), last: i >= n - 3,
+        // launch times scattered over the window, a volley of five at the end
+        const ats = [0, 0.12, ...Array.from({length: n - 7}, () => rand(0, window * 0.75)),
+            window * 0.8, window * 0.84, window * 0.88, window * 0.92, window * 0.96].sort((p, q) => p - q);
+        xs.forEach((fx, i) => this.queue.push({at: now + ats[i], fx: clamp(fx, 0.05, 0.95), last: i >= n - 5,
             relight: relight && i === n - 1 && !!this.lamp && !!this.onWick}));
+        this.queue.push({at: now + window, text: true});
+        this.queue.sort((a, b) => a.at - b.at);
         return true;
     }
 
     tick(now, dt) {
         const {W, H, s} = this;
         while (this.queue.length && this.queue[0].at <= now) {
-            const {fx, last, relight} = this.queue.shift();
+            const {fx, last, relight, text} = this.queue.shift();
             if (relight) {
                 // climb from below the lamp to just above it
                 const lp = this.lamp();
@@ -894,12 +950,21 @@ export class Crackers {
                 this.play(`whoosh-${Math.floor(Math.random() * 2)}`);
                 continue;
             }
+            if (text) {
+                // the big one: up the middle, a thick bright trail
+                this.rockets.push({
+                    x0: W / 2, y0: H + 10 * s, x1: W / 2, y1: H * 0.3,
+                    x: W / 2, y: H + 10 * s, t: 0, dur: 1.3, trail: [], text: true,
+                });
+                this.play('whoosh-big');
+                continue;
+            }
             const x0 = fx * W;
+            const kind = last ? pick(['peony', 'ring', 'peony']) :
+                pick(['peony', 'peony', 'ring', 'willow', 'glitter', 'double']);
             this.rockets.push({
-                x0, y0: H + 10 * s, x1: x0 + rand(-50, 50) * s, y1: H * rand(0.16, 0.42),
-                x: x0, y: H + 10 * s, t: 0, dur: rand(1.0, 1.35), trail: [],
-                // the finale skips the slow willows so the show ends on time
-                willow: !last && Math.random() < 0.3,
+                x0, y0: H + 10 * s, x1: x0 + rand(-60, 60) * s, y1: H * rand(0.12, 0.42),
+                x: x0, y: H + 10 * s, t: 0, dur: rand(0.95, 1.3), trail: [], kind,
             });
             this.play(`whoosh-${Math.floor(Math.random() * 2)}`);
         }
@@ -910,17 +975,20 @@ export class Crackers {
             r.x = r.x0 + (r.x1 - r.x0) * e + Math.sin(r.t * 9) * 1.2 * s;
             r.y = r.y0 + (r.y1 - r.y0) * e;
             r.trail.push([r.x, r.y]);
-            if (r.trail.length > 14)
+            if (r.trail.length > 18)
                 r.trail.shift();
             if (u < 1)
                 return true;
             if (r.relight)
                 this._relightBurst(r);
+            else if (r.text)
+                this._textBurst(r);
             else
                 this._burst(r);
             return false;
         });
         this._tickSeeds(dt);
+        const born = [];
         this.sparks = this.sparks.filter(p => {
             p.age += dt;
             const drag = Math.exp(-p.drag * dt);
@@ -928,9 +996,22 @@ export class Crackers {
             p.vy = p.vy * drag + p.grav * dt;
             p.x += p.vx * dt;
             p.y += p.vy * dt;
+            // glitter: near the end each spark crackles into a few tiny white flashes
+            if (p.glitter && !p.popped && p.age > p.life * 0.62) {
+                p.popped = true;
+                for (let k = 0; k < 3; k++) {
+                    born.push({x: p.x, y: p.y, vx: rand(-40, 40) * s, vy: rand(-40, 40) * s, age: 0,
+                        life: rand(0.25, 0.45), drag: 3, grav: 20 * s, col: '#fffbe8', w: 1.4 * s, tw: 0});
+                }
+                if (Math.random() < 0.04)
+                    this.play('crackle');
+            }
             return p.age < p.life;
         });
-        this.glows = this.glows.filter(g => (g.age += dt) < 0.6);
+        this.sparks.push(...born);
+        this._tickWords(dt);
+        this.glows = this.glows.filter(g => (g.age += dt) < (g.life ?? 0.7));
+        this.flash = Math.max(0, this.flash - dt * 2.2);
     }
 
     // a small golden bloom, and one bright spark falling onto each wick in turn
@@ -983,34 +1064,123 @@ export class Crackers {
 
     _burst(r) {
         const s = this.s;
-        const cols = r.willow ? BURSTS[0] : pick(BURSTS);
-        const n = r.willow ? 40 : 48;
-        const R = rand(190, 250) * s;
-        // an outer ring and a softer inner bloom, so it opens like a flower
-        for (let i = 0; i < n * 1.5; i++) {
-            const inner = i >= n;
-            const ang = ((inner ? i - n : i) / (inner ? n / 2 : n)) * Math.PI * 2 + rand(-0.08, 0.08);
-            const sp = R * (inner ? rand(0.35, 0.6) : r.willow ? rand(0.6, 1) : rand(0.86, 1));
-            this.sparks.push({
-                x: r.x, y: r.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
-                age: 0, life: r.willow ? rand(2.0, 2.6) : rand(1.3, 1.8),
-                drag: r.willow ? 1.4 : 2.1, grav: (r.willow ? 70 : 45) * s,
-                col: inner ? cols[1] : pick(cols), w: (inner ? 1.2 : r.willow ? 1.3 : 1.6) * s, tw: rand(0, 6.28),
-            });
+        const kind = r.kind ?? 'peony';
+        const cols = kind === 'willow' ? BURSTS[0] : kind === 'glitter' ? ['#fff4d0', '#ffe08a', '#ffffff'] : pick(BURSTS);
+        const R = rand(280, 380) * s * (kind === 'ring' ? 0.8 : 1);
+        const n = 80;
+        const add = (ang, sp, o) => this.sparks.push({
+            x: r.x, y: r.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, age: 0, tw: rand(0, 6.28), ...o,
+        });
+        if (kind === 'ring') {
+            // one crisp ring, tilted a little
+            const tilt = rand(-0.6, 0.6), sq = rand(0.45, 1);
+            for (let i = 0; i < n; i++) {
+                const a = (i / n) * Math.PI * 2;
+                const vx = Math.cos(a), vy = Math.sin(a) * sq;
+                const ang = Math.atan2(vx * Math.sin(tilt) + vy * Math.cos(tilt), vx * Math.cos(tilt) - vy * Math.sin(tilt));
+                add(ang, R * Math.hypot(vx, vy), {life: rand(1.5, 1.9), drag: 1.6, grav: 40 * s, col: pick(cols), w: 2.2 * s});
+            }
+        } else {
+            // an outer shell and a brighter inner bloom, so it opens like a flower
+            for (let i = 0; i < n * 1.6; i++) {
+                const inner = i >= n;
+                const ang = ((inner ? i - n : i) / (inner ? n * 0.6 : n)) * Math.PI * 2 + rand(-0.06, 0.06);
+                const willow = kind === 'willow';
+                const sp = R * (inner ? rand(0.32, 0.55) : willow ? rand(0.6, 1) : rand(0.88, 1));
+                add(ang, sp, {
+                    life: willow ? rand(2.4, 3.0) : rand(1.7, 2.3), drag: willow ? 1.2 : 1.45,
+                    grav: (willow ? 75 : 45) * s, col: inner ? (kind === 'double' ? pick(pick(BURSTS)) : cols[1]) : pick(cols),
+                    w: (inner ? 1.8 : 2.3) * s, glitter: kind === 'glitter' && !inner,
+                });
+            }
         }
-        this.glows.push({x: r.x, y: r.y, age: 0, col: cols[0]});
-        this.play(`pop-${Math.floor(Math.random() * 3)}`);
+        this.glows.push({x: r.x, y: r.y, age: 0, col: cols[0], r: 170});
+        this.flash = Math.min(1, this.flash + 0.35);
+        this.play(`boom-${Math.floor(Math.random() * 3)}`);
+    }
+
+    // the closing rocket: a golden burst, and its sparks fly out to spell the words
+    _textBurst(r) {
+        const s = this.s, W = this.W;
+        const step = 0.05;
+        const {dots, width} = textDots('Happy Diwali', step);
+        const h = Math.min((W * 0.8) / width, 170 * s);
+        dots.forEach(([dx, dy, dot], i) => {
+            const u = (dx + width / 2) / width;   // left to right, for the colour sweep
+            this.words.push({
+                x0: r.x, y0: r.y, x: r.x, y: r.y, tx: r.x + dx * h, ty: r.y + dy * h,
+                age: 0, fly: rand(0.45, 0.75), hold: TEXT_HOLD + u * 0.2, vx: 0, vy: 0,
+                col: TEXT_COLS[Math.min(TEXT_COLS.length - 1, Math.floor(u * TEXT_COLS.length))],
+                tw: rand(0, 6.28), w: (dot ? 5 : 4) * s * Math.min(1.25, h / (110 * s)), trail: [],
+                bulge: rand(-0.25, 0.25),
+            });
+        });
+        // and a big round bloom behind the words
+        for (let i = 0; i < 90; i++) {
+            const ang = (i / 90) * Math.PI * 2;
+            const sp = rand(380, 460) * s;
+            this.sparks.push({x: r.x, y: r.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, age: 0,
+                life: rand(1.6, 2.1), drag: 1.9, grav: 40 * s, col: pick(BURSTS[0]), w: 2 * s, tw: rand(0, 6.28)});
+        }
+        this.glows.push({x: r.x, y: r.y, age: 0, col: '#ffd27a', r: 320, life: 1.2});
+        this.flash = 1;
+        this.play('boom-big');
+        this.textGlow = {x: r.x, y: r.y, w: width * h, h};
+    }
+
+    _tickWords(dt) {
+        if (!this.words.length)
+            return;
+        const s = this.s;
+        this.words = this.words.filter(p => {
+            p.age += dt;
+            if (p.age < p.fly) {
+                // out from the burst along a slight curve, easing into place
+                const u = smooth(p.age / p.fly);
+                const bx = -(p.ty - p.y0) * p.bulge, by = (p.tx - p.x0) * p.bulge;
+                p.x = p.x0 + (p.tx - p.x0) * u + bx * Math.sin(Math.PI * u);
+                p.y = p.y0 + (p.ty - p.y0) * u + by * Math.sin(Math.PI * u);
+            } else if (p.age < p.fly + p.hold) {
+                // hang there, shimmering, sagging the tiniest bit
+                p.x = p.tx;
+                p.y = p.ty + (p.age - p.fly) * 4 * s;
+            } else {
+                // then let go: they drift down and fade like a willow
+                if (!p.falling) {
+                    p.falling = true;
+                    p.vx = rand(-12, 12) * s;
+                    p.vy = rand(0, 20) * s;
+                }
+                p.vy += 70 * s * dt;
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+            }
+            p.trail.push([p.x, p.y]);
+            if (p.trail.length > 6)
+                p.trail.shift();
+            return p.age < p.fly + p.hold + 0.9;
+        });
+        if (!this.words.length)
+            this.textGlow = null;
     }
 
     draw(cr) {
         const s = this.s ?? 1;
         cr.save();
         cr.setLineCap(Cairo.LineCap.ROUND);
+        if (this.flash > 0 && this.W) {
+            // the whole sky warms for a moment
+            rgba(cr, '#ffcf8a', 0.06 * this.flash);
+            cr.rectangle(0, 0, this.W, this.H);
+            cr.fill();
+        }
         for (const g of this.glows) {
-            const a = 0.22 * (1 - g.age / 0.6) * (g.r ? 1.6 : 1);
+            const life = g.life ?? 0.7;
+            const a = 0.34 * (1 - g.age / life);
             const r = (g.r ?? 80) * s;
             const grad = new Cairo.RadialGradient(g.x, g.y, 0, g.x, g.y, r);
             stop(grad, 0, g.col, a);
+            stop(grad, 0.4, g.col, a * 0.35);
             stop(grad, 1, g.col, 0);
             cr.setSource(grad);
             cr.newPath();
@@ -1018,19 +1188,20 @@ export class Crackers {
             cr.fill();
         }
         for (const r of this.rockets) {
-            // a thin fading trail and a small bright head
+            // a fading trail and a bright head
             const tr = r.trail;
+            const big = r.text ? 1.8 : 1.2;
             for (let i = 1; i < tr.length; i++) {
                 cr.newPath();
                 cr.moveTo(tr[i - 1][0], tr[i - 1][1]);
                 cr.lineTo(tr[i][0], tr[i][1]);
-                rgba(cr, '#ffe2a8', 0.55 * (i / tr.length));
-                cr.setLineWidth(1.3 * s);
+                rgba(cr, '#ffe2a8', 0.75 * (i / tr.length));
+                cr.setLineWidth(1.6 * s * big);
                 cr.stroke();
             }
             cr.newPath();
-            cr.arc(r.x, r.y, 1.6 * s, 0, Math.PI * 2);
-            rgba(cr, '#fff4d6', 0.85);
+            cr.arc(r.x, r.y, 2.2 * s * big, 0, Math.PI * 2);
+            rgba(cr, '#fffaf0', 1);
             cr.fill();
         }
         for (const p of this.seeds) {
@@ -1057,14 +1228,14 @@ export class Crackers {
         }
         for (const p of this.sparks) {
             const u = p.age / p.life;
-            // fade out, twinkling as they die
-            let a = 0.85 * (1 - u) ** 1.3;
-            if (u > 0.45)
+            // bright, then fading out, twinkling as they die
+            let a = (1 - u) ** 1.1;
+            if (u > 0.5)
                 a *= 0.6 + 0.4 * Math.sin(p.age * 28 + p.tw);
-            const tail = 0.07;
+            const tail = 0.08;
             const x0 = p.x - p.vx * tail, y0 = p.y - p.vy * tail;
             const w = p.w * (1 - 0.4 * u);
-            for (const [aa, ww] of [[0.18, w * 3.2], [1, w]]) {
+            for (const [aa, ww] of [[0.22, w * 3.4], [1, w]]) {
                 cr.newPath();
                 cr.moveTo(x0, y0);
                 cr.lineTo(p.x, p.y + 0.01);
@@ -1073,7 +1244,56 @@ export class Crackers {
                 cr.stroke();
             }
         }
+        this._drawWords(cr, s);
         cr.restore();
+    }
+
+    _drawWords(cr, s) {
+        if (!this.words.length)
+            return;
+        const tg = this.textGlow;
+        if (tg) {
+            // a warm haze behind the letters while they hang there
+            const a = clamp(Math.min(...this.words.slice(0, 1).map(p => p.age)) / 0.6, 0, 1) *
+                clamp((this.words[0].fly + this.words[0].hold + 0.6 - this.words[0].age) / 0.8, 0, 1);
+            cr.save();
+            cr.translate(tg.x, tg.y);
+            cr.scale(tg.w * 0.62, tg.h * 1.3);
+            const g = new Cairo.RadialGradient(0, 0, 0, 0, 0, 1);
+            stop(g, 0, '#ff9a3a', 0.3 * a);
+            stop(g, 1, '#ff9a3a', 0);
+            cr.setSource(g);
+            cr.newPath();
+            cr.arc(0, 0, 1, 0, Math.PI * 2);
+            cr.fill();
+            cr.restore();
+        }
+        for (const p of this.words) {
+            const end = p.fly + p.hold;
+            let a = p.age < end ? 1 : 1 - (p.age - end) / 0.9;
+            if (p.age > p.fly)
+                a *= 0.78 + 0.22 * Math.sin(p.age * 14 + p.tw);
+            const tr = p.trail;
+            // trail while flying out, or falling
+            if (p.age < p.fly || p.falling) {
+                for (let i = 1; i < tr.length; i++) {
+                    cr.newPath();
+                    cr.moveTo(tr[i - 1][0], tr[i - 1][1]);
+                    cr.lineTo(tr[i][0], tr[i][1]);
+                    rgba(cr, p.col, 0.5 * a * (i / tr.length));
+                    cr.setLineWidth(p.w * 0.8);
+                    cr.stroke();
+                }
+            }
+            for (const [aa, ww, col] of [[0.3, p.w * 3, p.col], [1, p.w, p.col], [1, p.w * 0.5, '#fffdf2']]) {
+                cr.newPath();
+                cr.moveTo(p.x, p.y);
+                cr.lineTo(p.x + 0.01, p.y + 0.01);
+                rgba(cr, col, a * aa);
+                cr.setLineWidth(ww);
+                cr.stroke();
+            }
+        }
     }
 }
 
@@ -1082,6 +1302,7 @@ export function drawSky(cr, w, h, sky) {
     cr.save();
     cr.scale(w / sky.W, h / sky.H);
     drawGust(cr, sky.W, sky.H, sky.gust);
+    sky.dragon?.draw(cr);
     sky.crackers.draw(cr);
     cr.restore();
 }

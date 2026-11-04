@@ -14,7 +14,7 @@ dbus-run-session -- bash -c 2>/dev/null '
   gsettings set org.gnome.desktop.background primary-color "#2a3a55"
   gnome-shell --headless --virtual-monitor 1920x1080 --no-x11 --wayland >"$DEEPAVALI_CHARM_TEST/shell.log" 2>&1 &
   pid=$!
-  for i in $(seq 140); do [ -f "$DEEPAVALI_CHARM_TEST/done" ] && break; sleep 0.5; done
+  for i in $(seq 220); do [ -f "$DEEPAVALI_CHARM_TEST/done" ] && break; sleep 0.5; done
   sleep 1; kill $pid; wait $pid 2>/dev/null'
 rm -rf "$SANDBOX"
 ls "$OUT"; grep -iE "deepavali|error|JS ERROR" "$OUT/shell.log" | head -20
