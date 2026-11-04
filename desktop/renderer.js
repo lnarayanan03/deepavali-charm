@@ -6,7 +6,8 @@ import {
     WICKS, PETALS, spoutTip, rand, pick, clamp, Flicker,
     G, DAMP, DROP_K, DROP_DAMP, CLICK_SLOP, STRETCH_DEAD, LEN_K, LEN_DAMP,
     drawGarland, drawLamp, drawDrop, drawFlame, drawGlow, drawHook, drawPetal,
-    isBack, drawOilDrop, spillRate, spoutWorld, Chimes, Lights, HOLD_MS,
+    isBack, drawOilDrop, Spill, spoutWorld, dropStart, DROP_GRAVITY, Sounds, Lights, HOLD_MS,
+    drawSky, Crackers, DOUBLE_MS,
 } from './draw.js';
 import {CanvasCairo, wrap} from './cairo-canvas.js';
 
@@ -63,9 +64,10 @@ function playSound(name) {
         api.test.log(`sound ${name}`);
     if (!soundOn)
         return;
+    // the files carry their own gentle levels; play them as they are
     sounds[name] ??= new Audio(`sounds/${name}.wav`);
     const a = sounds[name].cloneNode();
-    a.volume = name === 'bell' ? 0.45 : 0.35;
+    a.volume = 0.9;
     a.play().catch(() => {});
 }
 
@@ -78,11 +80,12 @@ let view = {width: window.innerWidth, height: window.innerHeight};
 const st = {
     theta: -0.9, omega: 0, phi: 0, phiV: 0,     // swing, and the bell drop's lag
     len: DEFAULT_LEN, restLen: DEFAULT_LEN, lenV: 0,
-    frac: 0.93, flare: 0, spill: 0,
+    frac: 0.93, flare: 0,
     drag: null, interactive: false,
     petals: [], oil: [],
 };
-const chimes = new Chimes(playSound);
+const sfx = new Sounds(playSound);
+const spill = new Spill();
 
 const glowSize = 250 * S;
 const glow = new Sprite(glowSize, glowSize, (cr, w, h) => drawGlow(cr, w, h));
@@ -101,6 +104,32 @@ const flames = WICKS.map(([ang, fw, fh]) => {
     return f;
 });
 const lights = new Lights(flames.map(f => f.tx), playSound);
+const crackers = new Crackers(playSound);
+// the whole-screen layer for the gust and the crackers
+const sky = {
+    get W() {
+        return view.width;
+    },
+    get H() {
+        return view.height;
+    },
+    get gust() {
+        return {...lights.gust, y: lampCenter()[1] - 14 * S, s: S};
+    },
+    crackers,
+};
+let clickTimer = 0;
+const cancelClick = () => {
+    clearTimeout(clickTimer);
+    clickTimer = 0;
+};
+// double-click: a few rockets go up across the screen
+function crackersUp() {
+    if (crackers.launch(performance.now() / 1000, view.width, view.height, S)) {
+        st.flare = 1;
+        st.omega += rand(0.2, 0.35) * (Math.random() < 0.5 ? -1 : 1);
+    }
+}
 let holdTimer = 0;
 const cancelHold = () => {
     clearTimeout(holdTimer);
@@ -192,10 +221,12 @@ function stepFlames(t, dt, omega) {
         const sw = f.sway.at(t * 0.7, dt);
         // hot air rises, motion pushes the tip back, a gust bends it over
         const lean = clamp(speed * 0.0012, -0.6, 0.6) + sw * 0.07 + lights.lean;
-        const level = lights.levels[i], smoke = lights.smoke[i];
-        const changed = Math.abs(level - (f.level ?? 1)) > 0.003 || smoke > 0 || (f.smoke ?? 0) > 0;
+        const level = lights.levels[i], smoke = lights.smoke[i], ember = lights.ember[i];
+        const changed = Math.abs(level - (f.level ?? 1)) > 0.003 || smoke > 0 || (f.smoke ?? 0) > 0 ||
+            ember > 0 || (f.ember ?? 0) > 0;
         f.level = level;
         f.smoke = smoke;
+        f.ember = ember;
         f.t = t;
         f.rot = st.theta - lean;           // undo the lamp's tilt so the flame stays upright
         f.sy = 1 + 0.13 * n + Math.min(0.35, Math.abs(speed) * 0.0007) + 0.25 * st.flare;
@@ -212,30 +243,25 @@ function stepFlames(t, dt, omega) {
     glowState.scale = 1 + 0.05 * g + 0.12 * st.flare;
 }
 
-function stepOil(dt, omega) {
+const oilDrop = new Sprite(5 * S, 7.5 * S, (cr, pw, ph) => drawOilDrop(cr, pw, ph));
+
+// a hard swing slops a few drops of oil off the lowest lip; they drip and fade
+function stepOil(now, dt, omega) {
     const [ax, ay] = anchor();
-    st.spill += spillRate(st.theta, omega, st.len) * dt;
-    while (st.spill >= 1 && st.oil.length < 40) {
-        st.spill -= 1;
-        // oil runs out of whichever spout is lowest right now
-        const tips = flames.filter(f => !f.back).map(f => spoutWorld(f.tx, f.ty, st.len, st.theta, omega, S));
+    let n = spill.tick(now, dt, st.theta, omega);
+    while (n-- > 0 && st.oil.length < 24) {
+        const tips = flames.map(f => spoutWorld(f.tx, f.ty, st.len, st.theta, omega, S));
         tips.sort((a, b) => b.y - a.y);
-        const p = tips[Math.random() < 0.7 ? 0 : 1];
-        const w = rand(5.5, 8.5) * S;
-        st.oil.push({
-            sprite: new Sprite(w, w * 1.45, (cr, pw, ph) => drawOilDrop(cr, pw, ph)), age: 0,
-            x: ax + p.x + rand(-2, 2) * S, y: ay + p.y,
-            vx: p.vx * 0.8 + rand(-20, 20) * S, vy: p.vy * 0.8 - rand(0, 40) * S,
-        });
+        const p = tips[Math.random() < 0.75 ? 0 : 1];
+        const d = dropStart(p, S);
+        st.oil.push({...d, x: ax + d.x, y: ay + d.y, age: 0});
     }
-    st.spill = Math.min(st.spill, 1);
     st.oil = st.oil.filter(o => {
         o.age += dt;
-        o.vy += 1500 * S * dt;
-        o.vx *= Math.exp(-0.8 * dt);
+        o.vy += DROP_GRAVITY * S * dt;
         o.x += o.vx * dt;
         o.y += o.vy * dt;
-        return o.y < view.height + 20 * S && o.age < 2.2;
+        return o.y < view.height + 20 * S && o.age < o.life;
     });
 }
 
@@ -342,13 +368,19 @@ function render() {
 
     hook.draw(ctx, ax - 12 * S, ay - 3 * S);
 
+    // the gust sweeps the whole screen, level with the flames near the lamp
+    if (lights.wind > 0 || crackers.active)
+        drawSky(wrap(ctx), view.width, view.height, sky);
+
     for (const o of st.oil) {
         ctx.save();
-        ctx.globalAlpha = clamp((2.2 - o.age) / 0.5, 0, 1);
+        // fade in as it leaves the lip, out as it falls
+        ctx.globalAlpha = clamp(o.age / 0.08, 0, 1) * clamp((o.life - o.age) / 0.4, 0, 1);
         ctx.translate(o.x, o.y);
         ctx.rotate(Math.atan2(-o.vx, o.vy));
-        ctx.scale(1, 1 + Math.min(0.8, Math.hypot(o.vx, o.vy) / (1600 * S)));
-        o.sprite.draw(ctx, -o.sprite.w / 2, -o.sprite.h * 0.6);
+        const k = o.size / oilDrop.w;
+        ctx.scale(k, k * (1 + Math.min(0.9, Math.hypot(o.vx, o.vy) / (900 * S))));
+        oilDrop.draw(ctx, -oilDrop.w / 2, -oilDrop.h * 0.6);
         ctx.restore();
     }
     for (const p of st.petals) {
@@ -375,8 +407,9 @@ function frame(ms) {
     const omega = held ? st.drag.omega : st.omega;
     stepFlames(now, dt, omega);
     stepPetals(dt);
-    stepOil(dt, omega);
-    chimes.tick(now, st.theta, omega);
+    crackers.tick(now, dt);
+    stepOil(now, dt, omega);
+    sfx.tick(now, st.theta, omega);
     render();
     requestAnimationFrame(frame);
 }
@@ -447,6 +480,7 @@ canvas.addEventListener('pointerdown', e => {
         ctrl: setMode(e),
     };
     canvas.style.cursor = 'grabbing';
+    sfx.touch(performance.now() / 1000);
     // press and hold without moving: a gust blows the flames out
     cancelHold();
     if (what === 'charm') {
@@ -512,13 +546,13 @@ function release(e) {
             // a stale velocity (pointer held still) shouldn't fling it
             const idle = e.timeStamp - d.t;
             st.omega = idle > 120 ? 0 : clamp(d.omega, -14, 14);
-            chimes.melody(now);
+            sfx.release(now, st.omega);
             if (d.stretched) {
                 if (d.ctrl || setMode(e)) {
                     // Ctrl+drag: the new length sticks
                     st.restLen = st.len;
                     st.lenV = 0;
-                    chimes.bell(now);
+                    sfx.lengthSet(now);
                     api.saveSettings({length: Math.round(st.restLen)});
                 } else {
                     // plain drag: let go and it snaps back like a rubber band
@@ -526,12 +560,20 @@ function release(e) {
                 }
             }
         } else if (!d.held) {
-            shower();
-            chimes.melody(now, 6);
-            chimes.bell(now);
+            // wait a moment to see whether this is a double-click
+            if (clickTimer) {
+                cancelClick();
+                crackersUp();
+            } else {
+                clickTimer = setTimeout(() => {
+                    clickTimer = 0;
+                    shower();
+                    sfx.shower(performance.now() / 1000);
+                }, DOUBLE_MS);
+            }
         }
     } else if (d.moved) {
-        chimes.melody(now, 3);
+        sfx.hook(now);
         api.saveSettings({anchor: st.frac});
     }
     hover(e.clientX, e.clientY);
@@ -549,9 +591,11 @@ api.onCommand(c => {
     const now = performance.now() / 1000;
     if (c === 'shower') {
         shower();
-        chimes.melody(now, 6);
+        sfx.shower(now);
+    } else if (c === 'crackers') {
+        crackersUp();
     } else if (c === 'chime') {
-        chimes.melody(now, 5);
+        sfx.ringBells(now);
         st.omega += rand(0.6, 1) * (Math.random() < 0.5 ? -1 : 1);
     } else if (c === 'reset') {
         st.restLen = DEFAULT_LEN;
@@ -686,6 +730,15 @@ function runTest() {
         log('thrown');
         shot('thrown');
     });
+    // a big swing: a few drops of oil drip off the lowest lip
+    at(7.2, () => {
+        st.theta = 0;
+        st.omega = 4.2;
+    });
+    at(8.1, () => {
+        log('spill');
+        shot('spill');
+    });
     at(9.5, () => {
         st.theta = st.omega = 0;
         grabLamp();
@@ -711,24 +764,48 @@ function runTest() {
     // press and hold: blown out, then relit 5 s later
     at(12.6, grabLamp);
     at(12.7, down);
-    at(13.85, () => {
+    at(14.4, () => {
         log('blowing');
         shot('blowing');
     });
-    at(14.0, up);
-    at(15.4, () => {
+    at(14.5, up);
+    at(15.0, () => {
+        log('blowing_b');
+        shot('blowing_b');
+    });
+    at(16.6, () => {
         log('out');
         shot('out');
     });
-    at(20.9, () => {
+    at(21.2, () => {
         log('relighting');
         shot('relighting');
     });
-    at(22.2, () => {
+    at(23.0, () => {
+        log('relighting_b');
+        shot('relighting_b');
+    });
+    at(26.6, () => {
         log('relit');
         shot('relit');
     });
-    at(22.4, () => t.done());
+    // double-click: crackers go up across the screen, and no petals
+    at(27.0, grabLamp);
+    at(27.1, down);
+    at(27.16, up);
+    at(27.26, () => ev('mouseDown', {button: 'left', clickCount: 2}));
+    at(27.32, () => ev('mouseUp', {button: 'left', clickCount: 2}));
+    at(27.9, () => {
+        t.log(`crackers: rockets=${crackers.rockets.length} queued=${crackers.queue.length} petals=${st.petals.length}`);
+        shot('crackers_rise');
+    });
+    at(28.9, () => {
+        t.log(`crackers_b: sparks=${crackers.sparks.length}`);
+        shot('crackers_burst');
+    });
+    at(29.9, () => shot('crackers_bloom'));
+    at(33.2, () => t.log(`crackers_done: active=${crackers.active}`));
+    at(33.4, () => t.done());
 
     const t0 = performance.now() / 1000;
     let i = 0;

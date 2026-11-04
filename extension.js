@@ -1,8 +1,9 @@
 // Deepavali Charm: a brass hanging lamp (thooku vilakku) with five living flames,
 // hung from the top bar on a marigold and jasmine garland.
 // Drag it to swing it or stretch the chain like a rubber band (it springs back),
-// Ctrl+drag to set a new chain length, click it for a petal shower, press and hold to
-// blow the flames out (they relight after 5 s), drag the hook to move it.
+// Ctrl+drag to set a new chain length, click it for a petal shower, double-click it for
+// a few soft crackers across the sky, press and hold to blow the flames out (a gust
+// sweeps the whole screen; they slowly relight a few seconds later), drag the hook to move it.
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -21,7 +22,8 @@ import {
     WICKS, PETALS, spoutTip, rand, pick, clamp, Flicker,
     G, DAMP, DROP_K, DROP_DAMP, CLICK_SLOP, STRETCH_DEAD, LEN_K, LEN_DAMP,
     drawGarland, drawLamp, drawDrop, drawFlame, drawGlow, drawHook, drawPetal,
-    isBack, drawOilDrop, spillRate, spoutWorld, Chimes, Lights, HOLD_MS,
+    isBack, drawOilDrop, Spill, spoutWorld, dropStart, DROP_GRAVITY, Sounds, Lights, HOLD_MS,
+    drawSky, Crackers, DOUBLE_MS,
 } from './draw.js';
 
 useCairo(Cairo);
@@ -48,9 +50,9 @@ export default class DeepavaliCharm extends Extension {
         this._phiV = 0.0;
         this._petals = [];
         this._oil = [];
-        this._spill = 0;
+        this._spill = new Spill();
         this._dragging = null;
-        this._chimes = new Chimes(name => this._playSound(name));
+        this._sfx = new Sounds(name => this._playSound(name));
         this._signals = [];
         const cfg = this._loadConfig();
         this._frac = cfg.anchor;
@@ -61,6 +63,7 @@ export default class DeepavaliCharm extends Extension {
 
         this._buildActors();
         this._lights = new Lights(this._flames.map(f => f.tx), name => this._playSound(name));
+        this._crackers = new Crackers(name => this._playSound(name));
         this._place();
 
         this._timeline = new Clutter.Timeline({actor: this._root, duration: 1000, repeat_count: -1});
@@ -99,6 +102,7 @@ export default class DeepavaliCharm extends Extension {
             GLib.source_remove(this._testId);
         this._testId = 0;
         this._cancelHold();
+        this._cancelClick();
         this._endGrab();
         for (const [obj, id] of this._signals)
             obj.disconnect(id);
@@ -111,6 +115,8 @@ export default class DeepavaliCharm extends Extension {
         this._oil = [];
         this._hook?.destroy();
         this._hook = null;
+        this._sky?.destroy();
+        this._sky = null;
         this._root?.destroy();
         this._root = null;
         this._vptr = null;
@@ -201,7 +207,12 @@ export default class DeepavaliCharm extends Extension {
                 global.display.set_cursor(Meta.Cursor.DEFAULT);
         });
 
+        // the whole-screen layer for the gust and the crackers; clicks pass through it
+        this._sky = new St.DrawingArea({reactive: false, visible: false});
+        this._sky.connect('repaint', paint(drawSky, this._skyState()));
+
         Main.layoutManager.addChrome(this._root, {trackFullscreen: true});
+        Main.layoutManager.uiGroup.add_child(this._sky);
         Main.layoutManager.addChrome(this._hook, {affectsInputRegion: true, trackFullscreen: true});
         this._layoutLength();
     }
@@ -250,6 +261,11 @@ export default class DeepavaliCharm extends Extension {
         this._ax = Math.round(mon.x + margin + this._frac * (mon.width - 2 * margin));
         this._ay = pb.y + pb.height - 2 * s;
         this._root.set_position(this._ax - (W * s) / 2, this._ay);
+        // big screens draw the sky at a lower resolution and stretch it: it's all soft light
+        const q = Math.min(1, 2048 / (mon.width * (s / 1.2)));
+        this._sky.set_size(Math.ceil(mon.width * q), Math.ceil(mon.height * q));
+        this._sky.set_scale(1 / q, 1 / q);
+        this._sky.set_position(mon.x, mon.y);
         this._hook.set_position(this._ax - 12 * s, this._ay - 3 * s);
         this._apply();
     }
@@ -314,8 +330,8 @@ export default class DeepavaliCharm extends Extension {
         const omega = held ? this._dragging.omega : this._omega;
         this._stepFlames(now, dt, omega);
         this._stepPetals(dt);
-        this._stepOil(dt, omega);
-        this._chimes.tick(now, this._theta, omega);
+        this._stepOil(now, dt, omega);
+        this._sfx.tick(now, this._theta, omega);
     }
 
     // rubber band: when let go, the chain springs back to its set length
@@ -352,10 +368,12 @@ export default class DeepavaliCharm extends Extension {
             const sw = f.sway.at(t * 0.7, dt);
             // world lean: hot air rises, motion pushes the tip back, a gust bends it over
             const lean = clamp(speed * 0.0012, -0.6, 0.6) + sw * 0.07 + lights.lean;
-            const level = lights.levels[i], smoke = lights.smoke[i];
-            const changed = Math.abs(level - (f.level ?? 1)) > 0.003 || smoke > 0 || (f.smoke ?? 0) > 0;
+            const level = lights.levels[i], smoke = lights.smoke[i], ember = lights.ember[i];
+            const changed = Math.abs(level - (f.level ?? 1)) > 0.003 || smoke > 0 || (f.smoke ?? 0) > 0 ||
+                ember > 0 || (f.ember ?? 0) > 0;
             f.level = level;
             f.smoke = smoke;
+            f.ember = ember;
             f.t = t;
             // the root is rotated by theta, so undo it to keep the flame upright
             f.actor.rotation_angle_z = ((this._theta - lean) * 180) / Math.PI;
@@ -371,6 +389,49 @@ export default class DeepavaliCharm extends Extension {
         const g = glowSum / this._flames.length;
         this._glow.opacity = clamp(Math.round((215 + 40 * g + 40 * this._flare) * lights.glow), 0, 255);
         this._glow.scale_x = this._glow.scale_y = 1 + 0.05 * g + 0.12 * this._flare;
+
+        this._crackers.tick(this._now(), dt);
+        const sky = this._sky;
+        sky.visible = lights.wind > 0 || this._crackers.active;
+        if (sky.visible) {
+            sky.get_parent()?.set_child_above_sibling(sky, null);
+            sky.queue_repaint();
+        }
+    }
+
+    // what the sky layer draws, in screen px from the monitor's corner
+    _skyState() {
+        const self = this;
+        return {
+            get W() {
+                return self._mon.width;
+            },
+            get H() {
+                return self._mon.height;
+            },
+            get gust() {
+                const [, gy] = self._lampCenter();
+                return {...self._lights.gust, y: gy - 14 * self._s - self._mon.y, s: self._s};
+            },
+            get crackers() {
+                return self._crackers;
+            },
+        };
+    }
+
+    // double-click: a few rockets go up across the screen
+    _crackersUp() {
+        const m = this._mon;
+        if (this._crackers.launch(this._now(), m.width, m.height, this._s)) {
+            this._flare = 1;
+            this._kick(rand(0.2, 0.35) * (Math.random() < 0.5 ? -1 : 1));
+        }
+    }
+
+    _cancelClick() {
+        if (this._clickId)
+            GLib.source_remove(this._clickId);
+        this._clickId = 0;
     }
 
     // ----- input -----
@@ -394,6 +455,7 @@ export default class DeepavaliCharm extends Extension {
         this._lenV = 0;
         this._endGrab();
         this._grab = global.stage.grab(actor);
+        this._sfx.touch(this._now());
         // press and hold without moving: a gust blows the flames out
         this._cancelHold();
         if (what === 'charm') {
@@ -476,13 +538,13 @@ export default class DeepavaliCharm extends Extension {
                 // a stale velocity (pointer held still) shouldn't fling it
                 const idle = ev.get_time() - d.t;
                 this._omega = idle > 120 ? 0 : clamp(d.omega, -14, 14);
-                this._chimes.melody(this._now());
+                this._sfx.release(this._now(), this._omega);
                 if (d.stretched) {
                     if (d.ctrl || this._ctrl(ev)) {
                         // Ctrl+drag: the new length sticks
                         this._restLen = this._len;
                         this._lenV = 0;
-                        this._chimes.bell(this._now());
+                        this._sfx.lengthSet(this._now());
                         this._saveConfig();
                     } else {
                         // plain drag: let go and it snaps back like a rubber band
@@ -490,12 +552,21 @@ export default class DeepavaliCharm extends Extension {
                     }
                 }
             } else if (!d.held) {
-                this._shower();
-                this._chimes.melody(this._now(), 6);
-                this._chimes.bell(this._now());
+                // wait a moment to see whether this is a double-click
+                if (this._clickId) {
+                    this._cancelClick();
+                    this._crackersUp();
+                } else {
+                    this._clickId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, DOUBLE_MS, () => {
+                        this._clickId = 0;
+                        this._shower();
+                        this._sfx.shower(this._now());
+                        return GLib.SOURCE_REMOVE;
+                    });
+                }
             }
         } else if (d.moved) {
-            this._chimes.melody(this._now(), 3);
+            this._sfx.hook(this._now());
             this._saveConfig();
         }
         return Clutter.EVENT_STOP;
@@ -521,7 +592,7 @@ export default class DeepavaliCharm extends Extension {
     _playSound(name) {
         const file = Gio.File.new_for_path(GLib.build_filenamev([this.path, 'sounds', `${name}.wav`]));
         try {
-            global.display.get_sound_player().play_from_file(file, 'Deepavali charm chime', null);
+            global.display.get_sound_player().play_from_file(file, 'Deepavali charm', null);
         } catch (e) {
             console.warn(`deepavali-charm: could not play ${name}: ${e}`);
         }
@@ -531,48 +602,40 @@ export default class DeepavaliCharm extends Extension {
 
     // ----- oil -----
 
-    // a hard swing or a steep tilt slops oil over the spouts
-    _stepOil(dt, omega) {
+    // a hard swing slops a few drops of oil off the lowest lip; they drip and fade
+    _stepOil(now, dt, omega) {
         const s = this._s;
-        this._spill += spillRate(this._theta, omega, this._len) * dt;
-        while (this._spill >= 1 && this._oil.length < 40) {
-            this._spill -= 1;
-            // oil runs out of whichever spout is lowest right now
-            const tips = this._flames.filter(f => !f.back)
-                .map(f => spoutWorld(f.tx, f.ty, this._len, this._theta, omega, s));
+        let n = this._spill.tick(now, dt, this._theta, omega);
+        while (n-- > 0 && this._oil.length < 24) {
+            const tips = this._flames.map(f => spoutWorld(f.tx, f.ty, this._len, this._theta, omega, s));
             tips.sort((a, b) => b.y - a.y);
-            const p = tips[Math.random() < 0.7 ? 0 : 1];
-            const w = Math.round(rand(5.5, 8.5) * s), h = Math.round(w * 1.45);
+            const p = tips[Math.random() < 0.75 ? 0 : 1];
+            const d = dropStart(p, s);
+            const w = Math.max(3, Math.round(d.size)), h = Math.round(w * 1.5);
             const actor = new St.DrawingArea({
-                width: w, height: h, reactive: false,
+                width: w, height: h, reactive: false, opacity: 0,
                 pivot_point: new Graphene.Point({x: 0.5, y: 0.6}),
             });
             actor.connect('repaint', paint(drawOilDrop));
             Main.layoutManager.uiGroup.add_child(actor);
-            this._oil.push({
-                actor, w, h, age: 0,
-                x: this._ax + p.x + rand(-2, 2) * s, y: this._ay + p.y,
-                vx: p.vx * 0.8 + rand(-20, 20) * s, vy: p.vy * 0.8 - rand(0, 40) * s,
-            });
+            this._oil.push({...d, actor, w, h, age: 0, x: this._ax + d.x, y: this._ay + d.y});
         }
-        if (this._spill > 1)
-            this._spill = 1;
         if (!this._oil.length)
             return;
         const floor = this._mon.y + this._mon.height + 20 * s;
         this._oil = this._oil.filter(o => {
             o.age += dt;
-            o.vy += 1500 * s * dt;
-            o.vx *= Math.exp(-0.8 * dt);
+            o.vy += DROP_GRAVITY * s * dt;
             o.x += o.vx * dt;
             o.y += o.vy * dt;
             const a = o.actor;
             a.set_position(o.x - o.w / 2, o.y - o.h * 0.6);
             // stretch along the fall
             a.rotation_angle_z = (Math.atan2(-o.vx, o.vy) * 180) / Math.PI;
-            a.scale_y = 1 + Math.min(0.8, Math.hypot(o.vx, o.vy) / (1600 * s));
-            a.opacity = Math.round(255 * clamp((2.2 - o.age) / 0.5, 0, 1));
-            if (o.y > floor || o.age > 2.2) {
+            a.scale_y = 1 + Math.min(0.9, Math.hypot(o.vx, o.vy) / (900 * s));
+            // fade in as it leaves the lip, out as it falls
+            a.opacity = Math.round(255 * clamp(o.age / 0.08, 0, 1) * clamp((o.life - o.age) / 0.4, 0, 1));
+            if (o.y > floor || o.age > o.life) {
                 a.destroy();
                 return false;
             }
@@ -760,11 +823,23 @@ export default class DeepavaliCharm extends Extension {
         // press and hold: blown out, then relit 5 s later
         at(14.0, grabLamp);
         at(14.1, () => button(true));
-        at(15.25, () => log('blowing'), 'blowing');
-        at(15.4, () => button(false));
-        at(16.8, () => log('out'), 'out');
-        at(22.3, () => log('relighting'), 'relighting');
-        at(23.6, () => log('relit'), 'relit');
+        at(15.8, () => log('blowing'), 'blowing');
+        at(15.9, () => button(false));
+        at(17.9, () => log('out'), 'out');
+        at(22.6, () => log('relighting'), 'relighting');
+        at(24.4, () => log('relighting_b'), 'relighting_b');
+        at(28.0, () => log('relit'), 'relit');
+        // double-click: crackers go up across the screen, and no petals
+        at(28.4, grabLamp);
+        at(28.5, () => button(true));
+        at(28.56, () => button(false));
+        at(28.66, () => button(true));
+        at(28.72, () => button(false));
+        at(29.3, () => console.log(`deepavali-charm test crackers: rockets=${this._crackers.rockets.length} ` +
+            `queued=${this._crackers.queue.length} petals=${this._petals.length}`), 'crackers_rise');
+        at(30.3, () => console.log(`deepavali-charm test crackers_b: sparks=${this._crackers.sparks.length}`), 'crackers_burst');
+        at(31.3, () => {}, 'crackers_bloom');
+        at(34.5, () => console.log(`deepavali-charm test crackers_done: active=${this._crackers.active}`), 'crackers_done');
 
         const t0 = GLib.get_monotonic_time() / 1e6;
         let i = 0;

@@ -71,7 +71,8 @@ function createTray() {
     const startAtLogin = app.getLoginItemSettings().openAtLogin;
     tray.setContextMenu(Menu.buildFromTemplate([
         {label: 'Shower petals', click: () => win.webContents.send('command', 'shower')},
-        {label: 'Ring the chimes', click: () => win.webContents.send('command', 'chime')},
+        {label: 'Light crackers', click: () => win.webContents.send('command', 'crackers')},
+        {label: 'Ring the bell', click: () => win.webContents.send('command', 'chime')},
         {label: 'Reset chain length', click: () => win.webContents.send('command', 'reset')},
         {label: 'Sound', type: 'checkbox', checked: loadSettings().sound !== false,
             click: item => win.webContents.send('command', item.checked ? 'sound-on' : 'sound-off')},
@@ -85,8 +86,11 @@ function createTray() {
 ipcMain.on('interactive', (_e, on) => {
     win?.setIgnoreMouseEvents(!on, {forward: true});
 });
-ipcMain.handle('load-settings', () => loadSettings());
+// test runs start from the defaults and never touch the user's saved settings
+ipcMain.handle('load-settings', () => (testDir ? {} : loadSettings()));
 ipcMain.on('save-settings', (_e, s) => {
+    if (testDir)
+        return;
     try {
         fs.mkdirSync(path.dirname(settingsFile()), {recursive: true});
         fs.writeFileSync(settingsFile(), JSON.stringify({...loadSettings(), ...s}));
