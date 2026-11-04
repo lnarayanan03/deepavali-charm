@@ -1,0 +1,82 @@
+{
+  "name": "deepavali-charm",
+  "productName": "Deepavali Charm",
+  "version": "2.0.0",
+  "description": "A brass hanging lamp with five oil flames on a marigold garland that hangs from the top of your screen.",
+  "main": "main.js",
+  "author": "Lakshmi Narayanan Ranganatha",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "prestart": "node copy-shared.js",
+    "start": "electron .",
+    "pretest": "node copy-shared.js",
+    "test": "electron . --test=test-out",
+    "predist": "node copy-shared.js",
+    "dist": "electron-builder --publish never"
+  },
+  "build": {
+    "appId": "com.lnarayanan03.deepavalicharm",
+    "productName": "Deepavali Charm",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "renderer.js",
+      "cairo-canvas.js",
+      "draw.js",
+      "sounds/**",
+      "build/icon.png"
+    ],
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "Deepavali-Charm-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Deepavali-Charm-Portable-${version}.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.entertainment",
+      "extendInfo": {
+        "LSUIElement": true
+      }
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "build/icon.png"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.2.2",
+    "electron-builder": "^26.18.0"
+  }
+}

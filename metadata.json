@@ -1,6 +1,10 @@
 {
   "uuid": "deepavali-charm@ranga",
   "name": "Deepavali Charm",
-  "description": "A glowing akash kandil that hangs from the top bar. Drag and throw it, it swings when you switch workspaces, and clicking it showers flower petals.",
-  "shell-version": ["45", "46", "47"]
+  "description": "A brass hanging lamp with five oil flames on a marigold and jasmine garland, hung from the top bar. Drag to swing or stretch it (it springs back), Ctrl+drag to set the length, click for petals, press and hold to blow the flames out. Wind chimes and spilling oil.",
+  "shell-version": [
+    "45",
+    "46",
+    "47"
+  ]
 }

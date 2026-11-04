@@ -1,6 +1,8 @@
-// Deepavali Charm: a lit akash kandil (star lantern) hanging from the top bar.
-// Drag it and let go to throw it; it swings when you switch workspaces;
-// a click showers marigold, rose and jasmine petals.
+// Deepavali Charm: a brass hanging lamp (thooku vilakku) with five living flames,
+// hung from the top bar on a marigold and jasmine garland.
+// Drag it to swing it or stretch the chain like a rubber band (it springs back),
+// Ctrl+drag to set a new chain length, click it for a petal shower, press and hold to
+// blow the flames out (they relight after 5 s), drag the hook to move it.
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
@@ -14,351 +16,26 @@ import Cairo from 'cairo';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
-// Layout (px, at scale 1)
-const W = 120;            // charm actor width
-const CORD = 118;         // cord length from hook to the top of the star
-const STAR_R = 46;        // star outer radius
-const STAR_CY = CORD + STAR_R;   // star centre, measured from the hook
-const TASSEL_LEN = 92;
-const H = STAR_CY + STAR_R + TASSEL_LEN + 10;
+import {
+    useCairo, W, CHAIN_W, LAMP_W, LAMP_H, RIM_Y, DROP_W, DROP_H, DROP_Y, DEFAULT_LEN, MIN_LEN,
+    WICKS, PETALS, spoutTip, rand, pick, clamp, Flicker,
+    G, DAMP, DROP_K, DROP_DAMP, CLICK_SLOP, STRETCH_DEAD, LEN_K, LEN_DAMP,
+    drawGarland, drawLamp, drawDrop, drawFlame, drawGlow, drawHook, drawPetal,
+    isBack, drawOilDrop, spillRate, spoutWorld, Chimes, Lights, HOLD_MS,
+} from './draw.js';
 
-// Pendulum
-const K = 15.5;           // (2*pi/period)^2, period ~1.6 s
-const DAMP = 0.55;        // per second
-const TASSEL_K = 55;
-const TASSEL_DAMP = 5.5;
-const CLICK_SLOP = 6;     // px of movement before a press becomes a drag
+useCairo(Cairo);
 
 const CONFIG = GLib.build_filenamev([GLib.get_user_config_dir(), 'deepavali-charm.json']);
 
-const rand = (a, b) => a + Math.random() * (b - a);
-const pick = arr => arr[Math.floor(Math.random() * arr.length)];
-
-function rgba(cr, hex, a = 1) {
-    const n = parseInt(hex.slice(1), 16);
-    cr.setSourceRGBA(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, a);
-}
-
-function stop(g, off, hex, a = 1) {
-    const n = parseInt(hex.slice(1), 16);
-    g.addColorStopRGBA(off, ((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, a);
-}
-
-// ---------- drawing ----------
-
-function drawMarigold(cr, x, y, r) {
-    // ruffled outer ring, then two inner layers
-    const layers = [[r, '#e8590c', 14, 0.18], [r * 0.74, '#ff8c1a', 11, 0.2], [r * 0.46, '#ffb52e', 8, 0.22]];
-    for (const [rr, col, lobes, amp] of layers) {
-        cr.newPath();
-        for (let i = 0; i <= 72; i++) {
-            const t = (i / 72) * Math.PI * 2;
-            const k = rr * (1 + amp * Math.abs(Math.sin(t * lobes / 2)));
-            const px = x + Math.cos(t) * k, py = y + Math.sin(t) * k;
-            if (i === 0)
-                cr.moveTo(px, py);
-            else
-                cr.lineTo(px, py);
-        }
-        cr.closePath();
-        rgba(cr, col);
-        cr.fillPreserve();
-        rgba(cr, '#9c3200', 0.35);
-        cr.setLineWidth(0.6);
-        cr.stroke();
-    }
-    rgba(cr, '#a8430a', 0.8);
-    cr.arc(x, y, r * 0.16, 0, Math.PI * 2);
-    cr.fill();
-}
-
-function drawLeaf(cr, x, y, ang, len) {
-    cr.save();
-    cr.translate(x, y);
-    cr.rotate(ang);
-    cr.newPath();
-    cr.moveTo(0, 0);
-    cr.curveTo(len * 0.35, -len * 0.32, len * 0.8, -len * 0.22, len, 0);
-    cr.curveTo(len * 0.8, len * 0.22, len * 0.35, len * 0.32, 0, 0);
-    rgba(cr, '#2f9e44');
-    cr.fillPreserve();
-    rgba(cr, '#1b5e20', 0.7);
-    cr.setLineWidth(0.7);
-    cr.stroke();
-    cr.restore();
-}
-
-function starPoints(cx, cy, R, r, n = 5) {
-    const pts = [];
-    for (let i = 0; i < n * 2; i++) {
-        const a = -Math.PI / 2 + (i * Math.PI) / n;
-        const rr = i % 2 === 0 ? R : r;
-        pts.push([cx + Math.cos(a) * rr, cy + Math.sin(a) * rr]);
-    }
-    return pts;
-}
-
-function drawCord(area) {
-    const cr = area.get_context();
-    const [w] = area.get_surface_size();
-    const cx = w / 2;
-    // twisted gold cord
-    cr.setLineCap(Cairo.LineCap.ROUND);
-    rgba(cr, '#8a5a00');
-    cr.setLineWidth(3.2);
-    cr.moveTo(cx, 2);
-    cr.lineTo(cx, CORD + 4);
-    cr.stroke();
-    rgba(cr, '#ffd56b');
-    cr.setLineWidth(1.4);
-    for (let y = 4; y < CORD + 2; y += 6) {
-        cr.moveTo(cx - 1.4, y);
-        cr.lineTo(cx + 1.4, y + 3);
-        cr.stroke();
-    }
-    // marigolds threaded on the cord, a leaf pair under the top one
-    drawLeaf(cr, cx, 40, Math.PI * 0.82, 15);
-    drawLeaf(cr, cx, 40, Math.PI * 0.18, 15);
-    drawMarigold(cr, cx, 30, 9.5);
-    drawMarigold(cr, cx, 62, 11);
-    drawMarigold(cr, cx, 96, 12.5);
-    cr.$dispose();
-}
-
-function drawStar(area) {
-    const cr = area.get_context();
-    const [w, h] = area.get_surface_size();
-    const cx = w / 2, cy = h / 2;
-    const R = STAR_R, r = STAR_R * 0.46;
-    const pts = starPoints(cx, cy, R, r);
-    const path = () => {
-        cr.newPath();
-        pts.forEach(([x, y], i) => (i ? cr.lineTo(x, y) : cr.moveTo(x, y)));
-        cr.closePath();
+// repaint an St.DrawingArea with one of the shared draw functions
+function paint(fn, ...args) {
+    return area => {
+        const cr = area.get_context();
+        const [w, h] = area.get_surface_size();
+        fn(cr, w, h, ...args);
+        cr.$dispose();
     };
-
-    // paper body lit from inside
-    const g = new Cairo.RadialGradient(cx, cy, 2, cx, cy, R);
-    stop(g, 0, '#fff6d0');
-    stop(g, 0.28, '#ffd24a');
-    stop(g, 0.55, '#ff7a1a');
-    stop(g, 0.85, '#e0245e');
-    stop(g, 1, '#9e1048');
-    path();
-    cr.setSource(g);
-    cr.fill();
-
-    // 3D facets: each point split into a light and a dark half
-    for (let i = 0; i < 10; i += 2) {
-        const [px, py] = pts[i];
-        const [qx, qy] = pts[(i + 1) % 10];
-        cr.newPath();
-        cr.moveTo(cx, cy);
-        cr.lineTo(px, py);
-        cr.lineTo(qx, qy);
-        cr.closePath();
-        cr.setSourceRGBA(0.35, 0, 0.12, 0.22);
-        cr.fill();
-    }
-    // facet creases
-    cr.setLineWidth(0.9);
-    for (const [x, y] of pts) {
-        cr.moveTo(cx, cy);
-        cr.lineTo(x, y);
-    }
-    cr.setSourceRGBA(1, 0.86, 0.45, 0.55);
-    cr.stroke();
-
-    // gold trim with little mirror dots along the edges
-    path();
-    rgba(cr, '#ffcf40');
-    cr.setLineWidth(2.4);
-    cr.setLineJoin(Cairo.LineJoin.ROUND);
-    cr.stroke();
-    for (let i = 0; i < 10; i++) {
-        const [ax, ay] = pts[i];
-        const [bx, by] = pts[(i + 1) % 10];
-        for (const t of [0.33, 0.66]) {
-            const x = ax + (bx - ax) * t, y = ay + (by - ay) * t;
-            rgba(cr, '#fffbe6');
-            cr.arc(x, y, 1.5, 0, Math.PI * 2);
-            cr.fill();
-        }
-    }
-
-    // centre mandala
-    for (let i = 0; i < 8; i++) {
-        const a = (i * Math.PI) / 4;
-        cr.save();
-        cr.translate(cx, cy);
-        cr.rotate(a);
-        cr.newPath();
-        cr.moveTo(0, 0);
-        cr.curveTo(4, -4, 10, -3, 12, 0);
-        cr.curveTo(10, 3, 4, 4, 0, 0);
-        rgba(cr, '#fffaf0', 0.85);
-        cr.fill();
-        cr.restore();
-    }
-    const c = new Cairo.RadialGradient(cx, cy, 0, cx, cy, 6);
-    stop(c, 0, '#ffffff');
-    stop(c, 1, '#ffb703');
-    cr.setSource(c);
-    cr.arc(cx, cy, 5, 0, Math.PI * 2);
-    cr.fill();
-    rgba(cr, '#c2185b');
-    cr.arc(cx, cy, 2, 0, Math.PI * 2);
-    cr.fill();
-
-    // top cap where the cord ties on
-    rgba(cr, '#b8860b');
-    cr.rectangle(cx - 4, cy - R - 5, 8, 7);
-    cr.fill();
-    rgba(cr, '#ffd56b');
-    cr.rectangle(cx - 4, cy - R - 5, 8, 2);
-    cr.fill();
-    cr.$dispose();
-}
-
-const RIBBONS = ['#e0245e', '#ff8c1a', '#ffd24a', '#2f9e44', '#9c27b0', '#ff8c1a', '#e0245e'];
-
-function drawTassels(area) {
-    const cr = area.get_context();
-    const [w] = area.get_surface_size();
-    const cx = w / 2;
-    const n = RIBBONS.length;
-    // bead bar
-    rgba(cr, '#ffcf40');
-    cr.setLineWidth(2);
-    cr.moveTo(cx - 22, 6);
-    cr.lineTo(cx + 22, 6);
-    cr.stroke();
-    for (let i = 0; i < n; i++) {
-        const x = cx - 21 + (i * 42) / (n - 1);
-        const len = TASSEL_LEN - 14 - Math.abs(i - (n - 1) / 2) * 7;
-        cr.newPath();
-        cr.moveTo(x - 2.4, 6);
-        cr.curveTo(x - 3, 6 + len * 0.4, x + 2, 6 + len * 0.7, x - 1, 6 + len);
-        cr.lineTo(x + 2.2, 6 + len - 3);
-        cr.curveTo(x + 4.5, 6 + len * 0.7, x - 0.5, 6 + len * 0.4, x + 2.4, 6);
-        cr.closePath();
-        rgba(cr, RIBBONS[i]);
-        cr.fillPreserve();
-        cr.setSourceRGBA(0, 0, 0, 0.18);
-        cr.setLineWidth(0.6);
-        cr.stroke();
-        rgba(cr, '#fff3c4');
-        cr.arc(x, 6, 2.1, 0, Math.PI * 2);
-        cr.fill();
-    }
-    // bell at the bottom of the middle ribbon
-    const by = 6 + TASSEL_LEN - 14 + 2;
-    const bell = new Cairo.LinearGradient(cx - 6, 0, cx + 6, 0);
-    stop(bell, 0, '#a86f00');
-    stop(bell, 0.45, '#ffe08a');
-    stop(bell, 1, '#a86f00');
-    cr.newPath();
-    cr.moveTo(cx - 6, by + 9);
-    cr.curveTo(cx - 6, by, cx - 3, by - 1, cx, by - 1);
-    cr.curveTo(cx + 3, by - 1, cx + 6, by, cx + 6, by + 9);
-    cr.closePath();
-    cr.setSource(bell);
-    cr.fill();
-    rgba(cr, '#7a4f00');
-    cr.arc(cx, by + 10, 1.8, 0, Math.PI * 2);
-    cr.fill();
-    cr.$dispose();
-}
-
-function drawGlow(area) {
-    const cr = area.get_context();
-    const [w, h] = area.get_surface_size();
-    const g = new Cairo.RadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
-    stop(g, 0, '#ffb347', 0.55);
-    stop(g, 0.35, '#ff8c1a', 0.22);
-    stop(g, 1, '#ff5e1a', 0);
-    cr.setSource(g);
-    cr.paint();
-    cr.$dispose();
-}
-
-function drawHook(area) {
-    const cr = area.get_context();
-    const [w] = area.get_surface_size();
-    const cx = w / 2;
-    const g = new Cairo.LinearGradient(cx - 7, 0, cx + 7, 0);
-    stop(g, 0, '#8a5a00');
-    stop(g, 0.5, '#ffe08a');
-    stop(g, 1, '#8a5a00');
-    cr.setSource(g);
-    cr.rectangle(cx - 9, 0, 18, 4);
-    cr.fill();
-    cr.setSource(g);
-    cr.setLineWidth(2.6);
-    cr.arc(cx, 9, 4.5, 0, Math.PI * 2);
-    cr.stroke();
-    cr.$dispose();
-}
-
-// petals: marigold, rose, jasmine, sparkle
-const PETALS = [
-    {kind: 'marigold', w: 3}, {kind: 'rose', w: 3}, {kind: 'jasmine', w: 2}, {kind: 'spark', w: 2},
-];
-
-function drawPetal(area, kind, hue) {
-    const cr = area.get_context();
-    const [w, h] = area.get_surface_size();
-    const cx = w / 2, cy = h / 2;
-    if (kind === 'marigold') {
-        cr.newPath();
-        cr.moveTo(cx, cy - 7);
-        cr.curveTo(cx + 7, cy - 6, cx + 7, cy + 5, cx + 2, cy + 7);
-        cr.lineTo(cx, cy + 5);
-        cr.lineTo(cx - 2, cy + 7);
-        cr.curveTo(cx - 7, cy + 5, cx - 7, cy - 6, cx, cy - 7);
-        rgba(cr, hue);
-        cr.fillPreserve();
-        rgba(cr, '#b33d00', 0.5);
-        cr.setLineWidth(0.7);
-        cr.stroke();
-    } else if (kind === 'rose') {
-        cr.newPath();
-        cr.moveTo(cx, cy + 8);
-        cr.curveTo(cx - 9, cy + 1, cx - 6, cy - 8, cx, cy - 6);
-        cr.curveTo(cx + 6, cy - 8, cx + 9, cy + 1, cx, cy + 8);
-        const g = new Cairo.RadialGradient(cx - 2, cy - 2, 0, cx, cy, 9);
-        stop(g, 0, '#ff6b8b');
-        stop(g, 1, hue);
-        cr.setSource(g);
-        cr.fill();
-    } else if (kind === 'jasmine') {
-        for (let i = 0; i < 5; i++) {
-            cr.save();
-            cr.translate(cx, cy);
-            cr.rotate((i * Math.PI * 2) / 5);
-            cr.newPath();
-            cr.moveTo(0, 0);
-            cr.curveTo(-3.5, -3, -2.5, -7.5, 0, -8);
-            cr.curveTo(2.5, -7.5, 3.5, -3, 0, 0);
-            rgba(cr, '#fffdf5');
-            cr.fillPreserve();
-            cr.setSourceRGBA(0.85, 0.82, 0.7, 0.6);
-            cr.setLineWidth(0.5);
-            cr.stroke();
-            cr.restore();
-        }
-        rgba(cr, '#ffd24a');
-        cr.arc(cx, cy, 1.6, 0, Math.PI * 2);
-        cr.fill();
-    } else {
-        const g = new Cairo.RadialGradient(cx, cy, 0, cx, cy, w / 2);
-        stop(g, 0, '#ffffff', 1);
-        stop(g, 0.25, '#ffe066', 0.9);
-        stop(g, 1, '#ff9f1a', 0);
-        cr.setSource(g);
-        cr.paint();
-    }
-    cr.$dispose();
 }
 
 // ---------- extension ----------
@@ -367,19 +44,29 @@ export default class DeepavaliCharm extends Extension {
     enable() {
         this._theta = 0.0;
         this._omega = 0.0;
-        this._phi = 0.0;        // tassel lag angle
+        this._phi = 0.0;        // bell drop lag angle
         this._phiV = 0.0;
         this._petals = [];
+        this._oil = [];
+        this._spill = 0;
         this._dragging = null;
+        this._chimes = new Chimes(name => this._playSound(name));
         this._signals = [];
-        this._frac = this._loadFrac();
+        const cfg = this._loadConfig();
+        this._frac = cfg.anchor;
+        this._restLen = cfg.length;   // the set length the rubber band returns to
+        this._len = cfg.length;       // the length right now
+        this._lenV = 0;
+        this._flare = 0;
 
         this._buildActors();
+        this._lights = new Lights(this._flames.map(f => f.tx), name => this._playSound(name));
         this._place();
 
         this._timeline = new Clutter.Timeline({actor: this._root, duration: 1000, repeat_count: -1});
         this._timeline.connect('new-frame', () => this._tick());
         this._lastFrame = 0;
+        this._timeline.start();   // the flames are always alive
 
         const wm = global.workspace_manager;
         this._lastWs = wm.get_active_workspace_index();
@@ -387,7 +74,7 @@ export default class DeepavaliCharm extends Extension {
             const i = wm.get_active_workspace_index();
             const dir = Math.sign(i - this._lastWs) || 1;
             this._lastWs = i;
-            // the screen slides one way, the charm lags the other
+            // the screen slides one way, the lamp lags the other
             this._kick(-dir * rand(2.2, 2.9));
         });
         this._connect(Main.overview, 'showing', () => this._kick(rand(-1, 1) > 0 ? 1.2 : -1.2));
@@ -395,13 +82,10 @@ export default class DeepavaliCharm extends Extension {
         this._connect(Main.layoutManager, 'monitors-changed', () => this._place());
         this._connect(Main.layoutManager.panelBox, 'notify::height', () => this._place());
 
-        // a gentle breeze now and then
         this._breezeId = 0;
         this._scheduleBreeze();
 
-        // swing in on arrival
-        this._theta = -0.9;
-        this._wake();
+        this._theta = -0.9;   // swing in on arrival
 
         if (GLib.getenv('DEEPAVALI_CHARM_TEST'))
             this._runTest(GLib.getenv('DEEPAVALI_CHARM_TEST'));
@@ -414,19 +98,22 @@ export default class DeepavaliCharm extends Extension {
         if (this._testId)
             GLib.source_remove(this._testId);
         this._testId = 0;
+        this._cancelHold();
         this._endGrab();
         for (const [obj, id] of this._signals)
             obj.disconnect(id);
         this._signals = [];
         this._timeline?.stop();
         this._timeline = null;
-        for (const p of this._petals)
+        for (const p of [...this._petals, ...this._oil])
             p.actor.destroy();
         this._petals = [];
+        this._oil = [];
         this._hook?.destroy();
         this._hook = null;
         this._root?.destroy();
         this._root = null;
+        this._vptr = null;
     }
 
     _connect(obj, sig, fn) {
@@ -439,53 +126,73 @@ export default class DeepavaliCharm extends Extension {
 
         this._root = new St.Widget({
             layout_manager: new Clutter.FixedLayout(),
-            width: W * s, height: H * s,
             pivot_point: new Graphene.Point({x: 0.5, y: 0}),
             reactive: false,
         });
 
-        const glowSize = 210 * s;
-        this._glow = new St.DrawingArea({width: glowSize, height: glowSize});
-        this._glow.set_position((W * s - glowSize) / 2, STAR_CY * s - glowSize / 2);
-        this._glow.connect('repaint', drawGlow);
-
-        const cord = new St.DrawingArea({width: W * s, height: (CORD + 8) * s});
-        cord.connect('repaint', drawCord);
-
-        this._tassels = new St.DrawingArea({
-            width: 60 * s, height: (TASSEL_LEN + 4) * s,
-            pivot_point: new Graphene.Point({x: 0.5, y: 0}),
-            reactive: true,
+        const glowSize = 250 * s;
+        this._glow = new St.DrawingArea({
+            width: glowSize, height: glowSize,
+            pivot_point: new Graphene.Point({x: 0.5, y: 0.5}),
         });
-        // hang from the star's bottom inner corner
-        this._tassels.set_position((W - 60) / 2 * s, (STAR_CY + STAR_R * 0.36) * s);
-        this._tassels.connect('repaint', drawTassels);
+        this._glow.connect('repaint', paint(drawGlow));
 
-        const box = (STAR_R * 2 + 14) * s;
-        this._star = new St.DrawingArea({width: box, height: box, reactive: true, track_hover: true});
-        this._star.set_position((W * s - box) / 2, STAR_CY * s - box / 2);
-        this._star.connect('repaint', drawStar);
+        this._garland = new St.DrawingArea({width: CHAIN_W * s, reactive: true});
+        this._garland.connect('repaint', a => paint(drawGarland, this._len)(a));
+
+        this._drop = new St.DrawingArea({
+            width: DROP_W * s, height: DROP_H * s, reactive: true,
+            pivot_point: new Graphene.Point({x: 0.5, y: 0}),
+        });
+        this._drop.connect('repaint', paint(drawDrop));
+
+        // two layers, so the flames on the far side sit behind the front chains
+        this._lampBack = new St.DrawingArea({width: LAMP_W * s, height: LAMP_H * s});
+        this._lampBack.connect('repaint', paint(drawLamp, 'back'));
+        this._lamp = new St.DrawingArea({width: LAMP_W * s, height: LAMP_H * s, reactive: true});
+        this._lamp.connect('repaint', paint(drawLamp, 'front'));
+
+        this._flames = WICKS.map(([ang, fw, fh]) => {
+            const [tx, ty] = spoutTip(ang);
+            const f = {
+                tx, ty, back: isBack(ang), bend: 0, flick: new Flicker(), sway: new Flicker(),
+                actor: new St.DrawingArea({
+                    width: Math.round(fw * 1.9 * s), height: Math.round(fh * 1.2 * s),
+                    pivot_point: new Graphene.Point({x: 0.5, y: 1}),
+                }),
+            };
+            f.actor.connect('repaint', paint(drawFlame, f));
+            return f;
+        });
 
         this._root.add_child(this._glow);
-        this._root.add_child(cord);
-        this._root.add_child(this._tassels);
-        this._root.add_child(this._star);
+        this._root.add_child(this._drop);
+        this._root.add_child(this._garland);
+        this._root.add_child(this._lampBack);
+        for (const f of this._flames.filter(fl => fl.back))
+            this._root.add_child(f.actor);
+        this._root.add_child(this._lamp);
+        for (const f of this._flames.filter(fl => !fl.back))
+            this._root.add_child(f.actor);
 
-        for (const a of [this._star, this._tassels]) {
-            a.connect('button-press-event', (_a, ev) => this._onPress(ev, 'charm'));
+        for (const a of [this._lamp, this._garland, this._drop]) {
+            a.connect('button-press-event', (_a, ev) => this._onPress(ev, 'charm', a));
             a.connect('motion-event', (_a, ev) => this._onMotion(ev));
             a.connect('button-release-event', (_a, ev) => this._onRelease(ev));
-            a.connect('enter-event', () => global.display.set_cursor(Meta.Cursor.POINTING_HAND));
+            a.connect('enter-event', () => {
+                if (!this._dragging)
+                    global.display.set_cursor(Meta.Cursor.POINTING_HAND);
+            });
             a.connect('leave-event', () => {
                 if (!this._dragging)
                     global.display.set_cursor(Meta.Cursor.DEFAULT);
             });
         }
 
-        // the hook on the top bar: drag it sideways to move where the charm hangs
+        // the hook on the top bar: drag it sideways to move where the lamp hangs
         this._hook = new St.DrawingArea({width: 24 * s, height: 16 * s, reactive: true});
-        this._hook.connect('repaint', drawHook);
-        this._hook.connect('button-press-event', (_a, ev) => this._onPress(ev, 'hook'));
+        this._hook.connect('repaint', paint(drawHook));
+        this._hook.connect('button-press-event', (_a, ev) => this._onPress(ev, 'hook', this._hook));
         this._hook.connect('motion-event', (_a, ev) => this._onMotion(ev));
         this._hook.connect('button-release-event', (_a, ev) => this._onRelease(ev));
         this._hook.connect('enter-event', () => global.display.set_cursor(Meta.Cursor.MOVE_OR_RESIZE_WINDOW));
@@ -494,8 +201,34 @@ export default class DeepavaliCharm extends Extension {
                 global.display.set_cursor(Meta.Cursor.DEFAULT);
         });
 
-        Main.layoutManager.addChrome(this._root, {affectsInputRegion: true, trackFullscreen: true});
+        Main.layoutManager.addChrome(this._root, {trackFullscreen: true});
         Main.layoutManager.addChrome(this._hook, {affectsInputRegion: true, trackFullscreen: true});
+        this._layoutLength();
+    }
+
+    // position everything below the garland for the current chain length
+    _layoutLength() {
+        const s = this._s;
+        const L = this._len;
+        this._root.set_size(W * s, (L + DROP_Y + DROP_H + 4) * s);
+        this._garland.set_height((L + 6) * s);
+        this._garland.set_position((W - CHAIN_W) / 2 * s, 0);
+        this._garland.queue_repaint();
+        this._lamp.set_position((W - LAMP_W) / 2 * s, L * s);
+        this._lampBack.set_position((W - LAMP_W) / 2 * s, L * s);
+        this._drop.set_position((W - DROP_W) / 2 * s, (L + DROP_Y) * s);
+        for (const f of this._flames) {
+            const [aw, ah] = f.actor.get_size();
+            f.actor.set_position(W / 2 * s + f.tx * s - aw / 2, (L + f.ty + 1) * s - ah);
+        }
+        const g = this._glow.width;
+        this._glow.set_position((W * s - g) / 2, (L + RIM_Y - 8) * s - g / 2);
+    }
+
+    _maxLen() {
+        const mon = this._mon ?? Main.layoutManager.primaryMonitor;
+        const pb = Main.layoutManager.panelBox;
+        return Math.max(MIN_LEN + 20, (mon.height - pb.height) / this._s - DROP_Y - DROP_H - 30);
     }
 
     _place() {
@@ -504,38 +237,38 @@ export default class DeepavaliCharm extends Extension {
         const mon = Main.layoutManager.primaryMonitor;
         if (!mon)
             return;
+        this._mon = mon;
         const pb = Main.layoutManager.panelBox;
         const s = this._s;
         const margin = 40 * s;
+        this._restLen = clamp(this._restLen, MIN_LEN, this._maxLen());
+        const len = clamp(this._len, MIN_LEN, this._maxLen());
+        if (len !== this._len) {
+            this._len = len;
+            this._layoutLength();
+        }
         this._ax = Math.round(mon.x + margin + this._frac * (mon.width - 2 * margin));
         this._ay = pb.y + pb.height - 2 * s;
         this._root.set_position(this._ax - (W * s) / 2, this._ay);
         this._hook.set_position(this._ax - 12 * s, this._ay - 3 * s);
-        this._mon = mon;
         this._apply();
     }
 
     _apply() {
         this._root.rotation_angle_z = (-this._theta * 180) / Math.PI;
-        this._tassels.rotation_angle_z = (-this._phi * 180) / Math.PI;
+        this._drop.rotation_angle_z = (-this._phi * 180) / Math.PI;
     }
 
     _kick(dw) {
         this._omega += dw;
-        this._wake();
-    }
-
-    _wake() {
-        if (this._timeline && !this._timeline.is_playing()) {
-            this._lastFrame = 0;
-            this._timeline.start();
-        }
     }
 
     _scheduleBreeze() {
         this._breezeId = GLib.timeout_add_seconds(GLib.PRIORITY_LOW, Math.round(rand(25, 50)), () => {
-            if (Math.abs(this._omega) < 0.3)
+            if (Math.abs(this._omega) < 0.3) {
                 this._kick(rand(0.18, 0.4) * (Math.random() < 0.5 ? -1 : 1));
+                this._flare = Math.max(this._flare, 0.6);
+            }
             this._scheduleBreeze();
             return GLib.SOURCE_REMOVE;
         });
@@ -549,11 +282,13 @@ export default class DeepavaliCharm extends Extension {
         this._lastFrame = now;
         dt = Math.min(dt, 1 / 20);
 
+        const K = G / (this._len + 90);
         const steps = 4;
         const h = dt / steps;
+        const held = this._dragging?.what === 'charm' && this._dragging.moved;
+        let alpha = 0;
         for (let i = 0; i < steps; i++) {
-            let alpha;
-            if (this._dragging?.what === 'charm') {
+            if (held) {
                 alpha = 0;   // angle is set by the pointer
             } else {
                 alpha = -K * Math.sin(this._theta) - DAMP * this._omega;
@@ -564,27 +299,78 @@ export default class DeepavaliCharm extends Extension {
                 if (this._theta < -Math.PI)
                     this._theta += 2 * Math.PI;
             }
-            // tassels lag behind the star's swing
-            const phiA = -TASSEL_K * this._phi - TASSEL_DAMP * this._phiV - 0.9 * alpha;
+            // the bell drop lags behind the bowl's swing
+            const phiA = -DROP_K * this._phi - DROP_DAMP * this._phiV - 0.9 * alpha;
             this._phiV += phiA * h;
-            this._phi = Math.max(-0.9, Math.min(0.9, this._phi + this._phiV * h));
+            this._phi = clamp(this._phi + this._phiV * h, -0.9, 0.9);
         }
-        if (this._dragging?.what === 'charm') {
-            // feed the drag's angular speed into the tassels
+        if (held) {
             const d = this._dragging;
             this._phiV -= (d.omega - (d.lastOmega ?? 0)) * 0.6;
             d.lastOmega = d.omega;
         }
+        this._stepLength(dt);
         this._apply();
+        const omega = held ? this._dragging.omega : this._omega;
+        this._stepFlames(now, dt, omega);
         this._stepPetals(dt);
+        this._stepOil(dt, omega);
+        this._chimes.tick(now, this._theta, omega);
+    }
 
-        const still = Math.abs(this._theta) < 0.0015 && Math.abs(this._omega) < 0.003 &&
-            Math.abs(this._phi) < 0.002 && Math.abs(this._phiV) < 0.005;
-        if (still && !this._dragging && this._petals.length === 0) {
-            this._theta = this._omega = this._phi = this._phiV = 0;
-            this._apply();
-            this._timeline.stop();
+    // rubber band: when let go, the chain springs back to its set length
+    _stepLength(dt) {
+        if (this._dragging?.stretch && this._dragging.moved)
+            return;
+        const off = this._len - this._restLen;
+        if (Math.abs(off) < 0.2 && Math.abs(this._lenV) < 1) {
+            if (off !== 0) {
+                this._len = this._restLen;
+                this._lenV = 0;
+                this._layoutLength();
+            }
+            return;
         }
+        const steps = 4, h = dt / steps;
+        for (let i = 0; i < steps; i++) {
+            this._lenV += (-LEN_K * (this._len - this._restLen) - LEN_DAMP * this._lenV) * h;
+            this._len += this._lenV * h;
+        }
+        this._len = clamp(this._len, MIN_LEN * 0.6, this._maxLen() + 40);
+        this._layoutLength();
+    }
+
+    _stepFlames(t, dt, omega) {
+        // lamp speed in px/s at the bowl; the flames trail behind it and stretch
+        const speed = omega * (this._len + RIM_Y);
+        this._flare = Math.max(0, this._flare - dt * 0.8);
+        const lights = this._lights;
+        lights.tick(t, dt);
+        let glowSum = 0;
+        this._flames.forEach((f, i) => {
+            const n = f.flick.at(t, dt);
+            const sw = f.sway.at(t * 0.7, dt);
+            // world lean: hot air rises, motion pushes the tip back, a gust bends it over
+            const lean = clamp(speed * 0.0012, -0.6, 0.6) + sw * 0.07 + lights.lean;
+            const level = lights.levels[i], smoke = lights.smoke[i];
+            const changed = Math.abs(level - (f.level ?? 1)) > 0.003 || smoke > 0 || (f.smoke ?? 0) > 0;
+            f.level = level;
+            f.smoke = smoke;
+            f.t = t;
+            // the root is rotated by theta, so undo it to keep the flame upright
+            f.actor.rotation_angle_z = ((this._theta - lean) * 180) / Math.PI;
+            f.actor.scale_y = 1 + 0.13 * n + Math.min(0.35, Math.abs(speed) * 0.0007) + 0.25 * this._flare;
+            f.actor.scale_x = 1 - 0.07 * n + 0.1 * this._flare;
+            const bend = clamp(sw * 0.55 - lean * 0.8, -1, 1);
+            if (Math.abs(bend - f.bend) > 0.01 || changed) {
+                f.bend = bend;
+                f.actor.queue_repaint();
+            }
+            glowSum += n;
+        });
+        const g = glowSum / this._flames.length;
+        this._glow.opacity = clamp(Math.round((215 + 40 * g + 40 * this._flare) * lights.glow), 0, 255);
+        this._glow.scale_x = this._glow.scale_y = 1 + 0.05 * g + 0.12 * this._flare;
     }
 
     // ----- input -----
@@ -593,20 +379,39 @@ export default class DeepavaliCharm extends Extension {
         return Math.atan2(x - this._ax, y - this._ay);
     }
 
-    _onPress(ev, what) {
+    _onPress(ev, what, actor) {
         if (ev.get_button() !== 1)
             return Clutter.EVENT_PROPAGATE;
         const [x, y] = ev.get_coords();
         this._dragging = {
             what, x0: x, y0: y, moved: false,
             off: what === 'charm' ? this._theta - this._pointerAngle(x, y) : 0,
+            r0: Math.hypot(x - this._ax, y - this._ay), len0: this._len,
             t: ev.get_time(), theta: this._theta, omega: 0,
-            ax0: this._ax, lastX: x,
+            ax0: this._ax,
+            ctrl: this._ctrl(ev),
         };
-        this._grab = global.stage.grab(what === 'hook' ? this._hook : this._star);
-        // the star might be released over the tassels; route both to the same handlers
-        this._wake();
+        this._lenV = 0;
+        this._endGrab();
+        this._grab = global.stage.grab(actor);
+        // press and hold without moving: a gust blows the flames out
+        this._cancelHold();
+        if (what === 'charm') {
+            this._holdId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, HOLD_MS, () => {
+                this._holdId = 0;
+                const d = this._dragging;
+                if (d && !d.moved && this._lights.blowOut(this._now()))
+                    d.held = true;
+                return GLib.SOURCE_REMOVE;
+            });
+        }
         return Clutter.EVENT_STOP;
+    }
+
+    _cancelHold() {
+        if (this._holdId)
+            GLib.source_remove(this._holdId);
+        this._holdId = 0;
     }
 
     _onMotion(ev) {
@@ -614,8 +419,12 @@ export default class DeepavaliCharm extends Extension {
         if (!d)
             return Clutter.EVENT_PROPAGATE;
         const [x, y] = ev.get_coords();
-        if (!d.moved && Math.hypot(x - d.x0, y - d.y0) > CLICK_SLOP * this._s)
+        if (!d.moved && Math.hypot(x - d.x0, y - d.y0) > CLICK_SLOP * this._s) {
             d.moved = true;
+            // mostly up/down pulls the chain longer or shorter; otherwise it's a swing
+            d.stretch = Math.abs(y - d.y0) > 1.4 * Math.abs(x - d.x0);
+            this._cancelHold();
+        }
         if (!d.moved)
             return Clutter.EVENT_STOP;
 
@@ -623,23 +432,34 @@ export default class DeepavaliCharm extends Extension {
         const dtMs = Math.max(1, t - d.t);
         if (d.what === 'charm') {
             let th = this._pointerAngle(x, y) + d.off;
-            th = Math.max(-2.6, Math.min(2.6, th));
+            th = clamp(th, -2.6, 2.6);
             const w = ((th - d.theta) * 1000) / dtMs;
             d.omega = d.omega * 0.6 + w * 0.4;
             d.theta = th;
             this._theta = th;
+            // pulling away from the hook lengthens the chain, pushing back shortens it
+            const pull = !d.stretch ? 0 : Math.hypot(x - this._ax, y - this._ay) - d.r0;
+            const eff = Math.sign(pull) * Math.max(0, Math.abs(pull) - STRETCH_DEAD * this._s);
+            const len = clamp(d.len0 + eff / this._s, MIN_LEN, this._maxLen());
+            const vNow = ((len - this._len) * 1000) / dtMs;
+            d.lenV = (d.lenV ?? 0) * 0.6 + vNow * 0.4;
+            if (d.stretch && Math.abs(len - this._len) > 0.5) {
+                this._len = len;
+                d.stretched = true;
+                this._layoutLength();
+                this._place();
+            }
         } else {
             const mon = this._mon;
             const margin = 40 * this._s;
-            const nx = Math.max(mon.x + margin, Math.min(mon.x + mon.width - margin, d.ax0 + (x - d.x0)));
+            const nx = clamp(d.ax0 + (x - d.x0), mon.x + margin, mon.x + mon.width - margin);
             const dx = nx - this._ax;
             this._frac = (nx - mon.x - margin) / (mon.width - 2 * margin);
             this._place();
-            // moving the hook drags the charm behind it
+            // moving the hook drags the lamp behind it
             this._omega -= dx * 0.012;
         }
         d.t = t;
-        this._wake();
         return Clutter.EVENT_STOP;
     }
 
@@ -648,21 +468,41 @@ export default class DeepavaliCharm extends Extension {
         if (!d)
             return Clutter.EVENT_PROPAGATE;
         this._endGrab();
+        this._cancelHold();
         this._dragging = null;
         global.display.set_cursor(Meta.Cursor.DEFAULT);
         if (d.what === 'charm') {
             if (d.moved) {
                 // a stale velocity (pointer held still) shouldn't fling it
                 const idle = ev.get_time() - d.t;
-                this._omega = idle > 120 ? 0 : Math.max(-14, Math.min(14, d.omega));
-            } else {
+                this._omega = idle > 120 ? 0 : clamp(d.omega, -14, 14);
+                this._chimes.melody(this._now());
+                if (d.stretched) {
+                    if (d.ctrl || this._ctrl(ev)) {
+                        // Ctrl+drag: the new length sticks
+                        this._restLen = this._len;
+                        this._lenV = 0;
+                        this._chimes.bell(this._now());
+                        this._saveConfig();
+                    } else {
+                        // plain drag: let go and it snaps back like a rubber band
+                        this._lenV = idle > 120 ? 0 : clamp(d.lenV ?? 0, -1500, 1500);
+                    }
+                }
+            } else if (!d.held) {
                 this._shower();
+                this._chimes.melody(this._now(), 6);
+                this._chimes.bell(this._now());
             }
         } else if (d.moved) {
-            this._saveFrac();
+            this._chimes.melody(this._now(), 3);
+            this._saveConfig();
         }
-        this._wake();
         return Clutter.EVENT_STOP;
+    }
+
+    _ctrl(ev) {
+        return (ev.get_state() & Clutter.ModifierType.CONTROL_MASK) !== 0;
     }
 
     _endGrab() {
@@ -672,23 +512,89 @@ export default class DeepavaliCharm extends Extension {
         }
     }
 
+    _now() {
+        return GLib.get_monotonic_time() / 1e6;
+    }
+
+    // ----- sound -----
+
+    _playSound(name) {
+        const file = Gio.File.new_for_path(GLib.build_filenamev([this.path, 'sounds', `${name}.wav`]));
+        try {
+            global.display.get_sound_player().play_from_file(file, 'Deepavali charm chime', null);
+        } catch (e) {
+            console.warn(`deepavali-charm: could not play ${name}: ${e}`);
+        }
+        if (this._testId)
+            console.log(`deepavali-charm test sound ${name}`);
+    }
+
+    // ----- oil -----
+
+    // a hard swing or a steep tilt slops oil over the spouts
+    _stepOil(dt, omega) {
+        const s = this._s;
+        this._spill += spillRate(this._theta, omega, this._len) * dt;
+        while (this._spill >= 1 && this._oil.length < 40) {
+            this._spill -= 1;
+            // oil runs out of whichever spout is lowest right now
+            const tips = this._flames.filter(f => !f.back)
+                .map(f => spoutWorld(f.tx, f.ty, this._len, this._theta, omega, s));
+            tips.sort((a, b) => b.y - a.y);
+            const p = tips[Math.random() < 0.7 ? 0 : 1];
+            const w = Math.round(rand(5.5, 8.5) * s), h = Math.round(w * 1.45);
+            const actor = new St.DrawingArea({
+                width: w, height: h, reactive: false,
+                pivot_point: new Graphene.Point({x: 0.5, y: 0.6}),
+            });
+            actor.connect('repaint', paint(drawOilDrop));
+            Main.layoutManager.uiGroup.add_child(actor);
+            this._oil.push({
+                actor, w, h, age: 0,
+                x: this._ax + p.x + rand(-2, 2) * s, y: this._ay + p.y,
+                vx: p.vx * 0.8 + rand(-20, 20) * s, vy: p.vy * 0.8 - rand(0, 40) * s,
+            });
+        }
+        if (this._spill > 1)
+            this._spill = 1;
+        if (!this._oil.length)
+            return;
+        const floor = this._mon.y + this._mon.height + 20 * s;
+        this._oil = this._oil.filter(o => {
+            o.age += dt;
+            o.vy += 1500 * s * dt;
+            o.vx *= Math.exp(-0.8 * dt);
+            o.x += o.vx * dt;
+            o.y += o.vy * dt;
+            const a = o.actor;
+            a.set_position(o.x - o.w / 2, o.y - o.h * 0.6);
+            // stretch along the fall
+            a.rotation_angle_z = (Math.atan2(-o.vx, o.vy) * 180) / Math.PI;
+            a.scale_y = 1 + Math.min(0.8, Math.hypot(o.vx, o.vy) / (1600 * s));
+            a.opacity = Math.round(255 * clamp((2.2 - o.age) / 0.5, 0, 1));
+            if (o.y > floor || o.age > 2.2) {
+                a.destroy();
+                return false;
+            }
+            return true;
+        });
+    }
+
     // ----- petals -----
 
-    _starCenter() {
-        const s = this._s;
-        const L = STAR_CY * s;
+    _lampCenter() {
+        const L = (this._len + RIM_Y) * this._s;
         return [this._ax + Math.sin(this._theta) * L, this._ay + Math.cos(this._theta) * L];
     }
 
     _shower() {
-        const [cx, cy] = this._starCenter();
+        const [cx, cy] = this._lampCenter();
         const s = this._s;
         const total = PETALS.reduce((a, p) => a + p.w, 0);
-        const n = 60;
-        for (let i = 0; i < n; i++) {
+        for (let i = 0; i < 60; i++) {
             let r = Math.random() * total;
             const spec = PETALS.find(p => (r -= p.w) < 0) ?? PETALS[0];
-            const size = (spec.kind === 'spark' ? rand(10, 18) : rand(15, 21)) * s;
+            const size = Math.round((spec.kind === 'spark' ? rand(10, 18) : rand(15, 21)) * s);
             const hue = spec.kind === 'marigold'
                 ? pick(['#ff8c1a', '#ffa41b', '#ffb52e', '#f76707'])
                 : pick(['#c2185b', '#d6336c', '#a61e4d', '#e64980']);
@@ -696,22 +602,22 @@ export default class DeepavaliCharm extends Extension {
                 width: size, height: size, reactive: false,
                 pivot_point: new Graphene.Point({x: 0.5, y: 0.5}),
             });
-            actor.connect('repaint', a => drawPetal(a, spec.kind, hue));
+            actor.connect('repaint', paint(drawPetal, spec.kind, hue));
             Main.layoutManager.uiGroup.add_child(actor);
             const ang = rand(-Math.PI, 0);   // fan out upward and sideways
             const sp = rand(140, 460) * s;
-            const p = {
+            this._petals.push({
                 actor, kind: spec.kind, size,
                 x: cx + rand(-14, 14) * s, y: cy + rand(-14, 14) * s,
                 vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp * 0.9 - 60 * s,
                 rot: rand(0, 360), vr: rand(-260, 260),
                 flutter: rand(1.5, 3.5), phase: rand(0, 6.28), amp: rand(18, 46) * s,
                 age: 0, life: spec.kind === 'spark' ? rand(0.6, 1.2) : rand(5, 8),
-            };
-            this._petals.push(p);
+            });
         }
-        // the star jumps a little when tapped
+        // the lamp jumps a little and the flames flare up
         this._kick(rand(0.6, 1.0) * (Math.random() < 0.5 ? -1 : 1));
+        this._flare = 1;
         const parent = this._root.get_parent();
         parent?.set_child_above_sibling(this._root, null);
         parent?.set_child_above_sibling(this._hook, null);
@@ -728,7 +634,6 @@ export default class DeepavaliCharm extends Extension {
                 p.vx *= Math.exp(-3 * dt);
                 p.vy = p.vy * Math.exp(-3 * dt) + 60 * s * dt;
             } else {
-                // falling leaf: gravity, strong air drag, side-to-side drift
                 p.vy += 520 * s * dt;
                 const term = 95 * s;
                 if (p.vy > term)
@@ -742,7 +647,6 @@ export default class DeepavaliCharm extends Extension {
             const a = p.actor;
             a.set_position(p.x + sway - p.size / 2, p.y - p.size / 2);
             a.rotation_angle_z = p.rot;
-            // a tumbling petal shows its edge now and then
             if (p.kind !== 'spark')
                 a.scale_x = 0.35 + 0.65 * Math.abs(Math.cos(p.age * p.flutter * 0.8 + p.phase));
             const fade = Math.min(1, (p.life - p.age) / 0.8);
@@ -757,65 +661,136 @@ export default class DeepavaliCharm extends Extension {
 
     // ----- settings -----
 
-    _loadFrac() {
+    _loadConfig() {
+        const cfg = {anchor: 0.93, length: DEFAULT_LEN};
         try {
             const [ok, bytes] = GLib.file_get_contents(CONFIG);
             if (ok) {
-                const v = JSON.parse(new TextDecoder().decode(bytes)).anchor;
-                if (typeof v === 'number' && v >= 0 && v <= 1)
-                    return v;
+                const j = JSON.parse(new TextDecoder().decode(bytes));
+                if (typeof j.anchor === 'number' && j.anchor >= 0 && j.anchor <= 1)
+                    cfg.anchor = j.anchor;
+                if (typeof j.length === 'number' && j.length >= MIN_LEN)
+                    cfg.length = j.length;
             }
         } catch (e) {}
-        return 0.93;   // top right
+        return cfg;
     }
 
-    _saveFrac() {
+    _saveConfig() {
         try {
-            GLib.file_set_contents(CONFIG, JSON.stringify({anchor: this._frac}));
+            GLib.file_set_contents(CONFIG, JSON.stringify({anchor: this._frac, length: Math.round(this._restLen)}));
         } catch (e) {
-            console.warn(`deepavali-charm: could not save position: ${e}`);
+            console.warn(`deepavali-charm: could not save settings: ${e}`);
         }
     }
 
     // ----- self test (only when DEEPAVALI_CHARM_TEST=<dir> is set) -----
+    // drives a virtual mouse so the real press/drag/release path is exercised
 
     _runTest(dir) {
-        const shots = [
-            [2.5, 'rest', () => {}],
-            [3.0, 'swing', () => {
-                this._theta = 0.0;
-                this._omega = 0;
-                this._kick(2.6);
-            }],
-            [3.35, 'swing_peak', () => {}],
-            [4.5, 'shower', () => this._shower()],
-            [4.85, 'shower_0.35s', () => {}],
-            [5.7, 'shower_1.2s', () => {}],
-            [7.5, 'shower_3s', () => {}],
-        ];
+        const seat = Clutter.get_default_backend().get_default_seat();
+        this._vptr = seat.create_virtual_device(Clutter.InputDeviceType.POINTER_DEVICE);
+        const us = () => GLib.get_monotonic_time();
+        const move = (x, y) => this._vptr.notify_absolute_motion(us(), x, y);
+        const button = down => this._vptr.notify_button(us(), Clutter.BUTTON_PRIMARY,
+            down ? Clutter.ButtonState.PRESSED : Clutter.ButtonState.RELEASED);
+        const log = tag => console.log(`deepavali-charm test ${tag}: len=${this._len.toFixed(1)} ` +
+            `theta=${this._theta.toFixed(3)} omega=${this._omega.toFixed(3)} lights=${this._lights.state} oil=${this._oil.length}`);
+        let px = 0, py = 0;
+        const steps = [];
+        const at = (t, fn, shot) => steps.push([t, fn, shot]);
+        // glide the pointer from (px,py) by (dx,dy) over [t0, t1]
+        const glide = (t0, t1, dx, dy) => {
+            const n = 12;
+            for (let k = 1; k <= n; k++) {
+                at(t0 + ((t1 - t0) * k) / n, () => {
+                    px += dx / n;
+                    py += dy / n;
+                    move(px, py);
+                });
+            }
+        };
+        const grabLamp = () => {
+            const [cx, cy] = this._lampCenter();
+            px = cx;
+            py = cy + 12 * this._s;
+            move(px, py);
+        };
+
+        at(4.0, () => log('rest'), 'rest');
+        at(4.3, () => log('flame_a'), 'flame_a');
+        at(4.5, () => log('flame_b'), 'flame_b');
+        // plain pull down: stretches, then springs back on release
+        at(4.65, grabLamp);
+        at(4.7, () => button(true));
+        glide(4.75, 5.4, 0, 160 * this._s);
+        at(5.5, () => log('pulled'), 'pulled');
+        at(5.6, () => button(false));
+        at(5.75, () => log('snapping'), 'snapping');
+        at(6.6, () => log('after_pull'), 'after_pull');
+        // drag it sideways and throw it
+        at(6.8, grabLamp);
+        at(6.9, () => button(true));
+        glide(6.95, 7.5, -260 * this._s, 0);
+        at(7.55, () => log('drag_side'), 'drag_side');
+        glide(7.6, 7.75, 120 * this._s, 0);
+        at(7.76, () => button(false));
+        at(7.95, () => log('thrown'), 'thrown');
+        at(8.3, () => log('thrown_b'), 'thrown_b');
+        // Ctrl+pull down: the new length sticks
+        const kbd = seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
+        const ctrl = down => kbd.notify_keyval(us(), Clutter.KEY_Control_L,
+            down ? Clutter.KeyState.PRESSED : Clutter.KeyState.RELEASED);
+        at(10.5, () => {
+            this._theta = this._omega = 0;
+            grabLamp();
+        });
+        at(10.55, () => ctrl(true));
+        at(10.6, () => button(true));
+        glide(10.65, 11.2, 0, 110 * this._s);
+        at(11.25, () => button(false));
+        at(11.3, () => ctrl(false));
+        at(12.0, () => log('ctrl_set'), 'ctrl_set');
+        // click: petal shower
+        at(12.2, grabLamp);
+        at(12.3, () => button(true));
+        at(12.38, () => button(false));
+        at(12.8, () => log('shower'), 'shower');
+        at(13.8, () => {}, 'shower_1.5s');
+        // press and hold: blown out, then relit 5 s later
+        at(14.0, grabLamp);
+        at(14.1, () => button(true));
+        at(15.25, () => log('blowing'), 'blowing');
+        at(15.4, () => button(false));
+        at(16.8, () => log('out'), 'out');
+        at(22.3, () => log('relighting'), 'relighting');
+        at(23.6, () => log('relit'), 'relit');
+
         const t0 = GLib.get_monotonic_time() / 1e6;
         let i = 0;
         const shooter = new Shell.Screenshot();
-        this._testId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 20, () => {
+        this._testId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 10, () => {
             const t = GLib.get_monotonic_time() / 1e6 - t0;
-            if (i >= shots.length) {
+            while (i < steps.length && t >= steps[i][0]) {
+                const [, fn, shot] = steps[i++];
+                fn();
+                if (shot) {
+                    const file = Gio.File.new_for_path(`${dir}/${shot}.png`);
+                    const stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
+                    shooter.screenshot(false, stream, (o, res) => {
+                        try {
+                            o.screenshot_finish(res);
+                        } catch (e) {
+                            console.error(`deepavali-charm test: ${e}`);
+                        }
+                        stream.close(null);
+                    });
+                }
+            }
+            if (i >= steps.length) {
                 this._testId = 0;
                 GLib.file_set_contents(`${dir}/done`, 'ok');
                 return GLib.SOURCE_REMOVE;
-            }
-            if (t >= shots[i][0]) {
-                const [, name, fn] = shots[i++];
-                fn();
-                const file = Gio.File.new_for_path(`${dir}/${name}.png`);
-                const stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
-                shooter.screenshot(false, stream, (o, res) => {
-                    try {
-                        o.screenshot_finish(res);
-                    } catch (e) {
-                        console.error(`deepavali-charm test: ${e}`);
-                    }
-                    stream.close(null);
-                });
             }
             return GLib.SOURCE_CONTINUE;
         });
