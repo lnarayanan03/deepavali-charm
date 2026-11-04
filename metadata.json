@@ -1,0 +1,6 @@
+{
+  "uuid": "deepavali-charm@ranga",
+  "name": "Deepavali Charm",
+  "description": "A glowing akash kandil that hangs from the top bar. Drag and throw it, it swings when you switch workspaces, and clicking it showers flower petals.",
+  "shell-version": ["45", "46", "47"]
+}
