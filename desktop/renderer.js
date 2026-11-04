@@ -118,6 +118,18 @@ const sky = {
     },
     crackers,
 };
+// relighting: a rocket bursts over the dark lamp and its sparks land on the wicks
+crackers.lamp = () => {
+    const [ax, ay] = anchor();
+    const [x, y] = lampCenter();
+    const wicks = flames.map(f => {
+        const p = spoutWorld(f.tx, f.ty + 1, st.len, st.theta, 0, S);
+        return {x: ax + p.x, y: ay + p.y};
+    });
+    return {x, y, wicks};
+};
+crackers.onWick = i => lights.lightWick(i, performance.now() / 1000);
+lights.onDark = now => crackers.relight(now, view.width, view.height, S);
 let clickTimer = 0;
 const cancelClick = () => {
     clearTimeout(clickTimer);
@@ -125,7 +137,7 @@ const cancelClick = () => {
 };
 // double-click: a few rockets go up across the screen
 function crackersUp() {
-    if (crackers.launch(performance.now() / 1000, view.width, view.height, S)) {
+    if (crackers.launch(performance.now() / 1000, view.width, view.height, S, lights.dark)) {
         st.flare = 1;
         st.omega += rand(0.2, 0.35) * (Math.random() < 0.5 ? -1 : 1);
     }
@@ -773,15 +785,20 @@ function runTest() {
         log('blowing_b');
         shot('blowing_b');
     });
-    at(16.6, () => {
+    at(17.0, () => {
         log('out');
         shot('out');
     });
-    at(21.2, () => {
+    // after the dark pause a rocket climbs to the lamp, bursts, and its sparks light the wicks
+    at(21.4, () => {
+        log('relight_rocket');
+        shot('relight_rocket');
+    });
+    at(22.5, () => {
         log('relighting');
         shot('relighting');
     });
-    at(23.0, () => {
+    at(23.3, () => {
         log('relighting_b');
         shot('relighting_b');
     });
@@ -804,8 +821,29 @@ function runTest() {
         shot('crackers_burst');
     });
     at(29.9, () => shot('crackers_bloom'));
-    at(33.2, () => t.log(`crackers_done: active=${crackers.active}`));
-    at(33.4, () => t.done());
+    at(31.5, () => {
+        t.log(`crackers_mid: rockets=${crackers.rockets.length} queued=${crackers.queue.length} sparks=${crackers.sparks.length}`);
+        shot('crackers_mid');
+    });
+    at(35.6, () => t.log(`crackers_done: active=${crackers.active}`));
+    // blow it out again, then double-click while it's dark: the finale relights it
+    at(36.0, grabLamp);
+    at(36.1, down);
+    at(37.0, up);
+    at(40.4, () => log('dark_again'));
+    at(40.6, down);
+    at(40.66, up);
+    at(40.76, () => ev('mouseDown', {button: 'left', clickCount: 2}));
+    at(40.82, () => ev('mouseUp', {button: 'left', clickCount: 2}));
+    at(43.6, () => {
+        t.log(`dark_show: queued=${crackers.queue.length} relighting=${crackers.relighting} lights=${lights.state}`);
+        shot('dark_show');
+    });
+    at(51.5, () => {
+        log('relit_by_finale');
+        shot('relit_by_finale');
+    });
+    at(51.7, () => t.done());
 
     const t0 = performance.now() / 1000;
     let i = 0;

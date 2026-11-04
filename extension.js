@@ -64,6 +64,18 @@ export default class DeepavaliCharm extends Extension {
         this._buildActors();
         this._lights = new Lights(this._flames.map(f => f.tx), name => this._playSound(name));
         this._crackers = new Crackers(name => this._playSound(name));
+        // relighting: a rocket bursts over the dark lamp and its sparks land on the wicks
+        this._crackers.lamp = () => {
+            const m = this._mon, s = this._s;
+            const [x, y] = this._lampCenter();
+            const wicks = this._flames.map(f => {
+                const p = spoutWorld(f.tx, f.ty + 1, this._len, this._theta, 0, s);
+                return {x: this._ax + p.x - m.x, y: this._ay + p.y - m.y};
+            });
+            return {x: x - m.x, y: y - m.y, wicks};
+        };
+        this._crackers.onWick = i => this._lights.lightWick(i, this._now());
+        this._lights.onDark = now => !!this._mon && this._crackers.relight(now, this._mon.width, this._mon.height, this._s);
         this._place();
 
         this._timeline = new Clutter.Timeline({actor: this._root, duration: 1000, repeat_count: -1});
@@ -422,7 +434,7 @@ export default class DeepavaliCharm extends Extension {
     // double-click: a few rockets go up across the screen
     _crackersUp() {
         const m = this._mon;
-        if (this._crackers.launch(this._now(), m.width, m.height, this._s)) {
+        if (this._crackers.launch(this._now(), m.width, m.height, this._s, this._lights.dark)) {
             this._flare = 1;
             this._kick(rand(0.2, 0.35) * (Math.random() < 0.5 ? -1 : 1));
         }
@@ -825,9 +837,11 @@ export default class DeepavaliCharm extends Extension {
         at(14.1, () => button(true));
         at(15.8, () => log('blowing'), 'blowing');
         at(15.9, () => button(false));
-        at(17.9, () => log('out'), 'out');
-        at(22.6, () => log('relighting'), 'relighting');
-        at(24.4, () => log('relighting_b'), 'relighting_b');
+        at(18.5, () => log('out'), 'out');
+        // after the dark pause a rocket climbs to the lamp, bursts, and its sparks light the wicks
+        at(22.8, () => log('relight_rocket'), 'relight_rocket');
+        at(23.9, () => log('relighting'), 'relighting');
+        at(24.7, () => log('relighting_b'), 'relighting_b');
         at(28.0, () => log('relit'), 'relit');
         // double-click: crackers go up across the screen, and no petals
         at(28.4, grabLamp);
@@ -839,7 +853,21 @@ export default class DeepavaliCharm extends Extension {
             `queued=${this._crackers.queue.length} petals=${this._petals.length}`), 'crackers_rise');
         at(30.3, () => console.log(`deepavali-charm test crackers_b: sparks=${this._crackers.sparks.length}`), 'crackers_burst');
         at(31.3, () => {}, 'crackers_bloom');
-        at(34.5, () => console.log(`deepavali-charm test crackers_done: active=${this._crackers.active}`), 'crackers_done');
+        at(32.9, () => console.log(`deepavali-charm test crackers_mid: rockets=${this._crackers.rockets.length} ` +
+            `queued=${this._crackers.queue.length} sparks=${this._crackers.sparks.length}`), 'crackers_mid');
+        at(36.9, () => console.log(`deepavali-charm test crackers_done: active=${this._crackers.active}`), 'crackers_done');
+        // blow it out again, then double-click while it's dark: the finale relights it
+        at(37.4, grabLamp);
+        at(37.5, () => button(true));
+        at(38.4, () => button(false));
+        at(41.8, () => log('dark_again'), 'dark_again');
+        at(42.0, () => button(true));
+        at(42.06, () => button(false));
+        at(42.16, () => button(true));
+        at(42.22, () => button(false));
+        at(45.0, () => console.log(`deepavali-charm test dark_show: queued=${this._crackers.queue.length} ` +
+            `relighting=${this._crackers.relighting} lights=${this._lights.state}`), 'dark_show');
+        at(52.9, () => log('relit_by_finale'), 'relit_by_finale');
 
         const t0 = GLib.get_monotonic_time() / 1e6;
         let i = 0;

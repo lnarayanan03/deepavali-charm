@@ -719,9 +719,19 @@ const STREAKS = (() => {
     }));
 })();
 
+// how strong the air is at (x, y): patches of strong and weak air that drift along
+// with the wind, so some streaks blaze and others barely show. d: distance blown.
+function airPatch(x, y, d, s) {
+    const u = x / s - d * 520, v = y / s;
+    const a = 0.5 + 0.5 * Math.sin(u * 0.0047 + v * 0.0031 + 0.7);
+    const b = 0.5 + 0.5 * Math.sin(v * 0.0093 - u * 0.0012 + d * 0.9 + 2.1);
+    return 0.12 + 0.88 * Math.pow(a * b, 0.6);
+}
+
 // streaks of moving air flowing across the whole screen, a few curling over.
 // Drawn in screen px (W x H). g = {k: strength 0..1, t: seconds since the gust began,
-// dir: +1 blows left-to-right, -1 right-to-left, y: height of the flames, s: scale}
+// d: how far the air has moved (speeds up in the puffs), dir: +1 blows left-to-right,
+// -1 right-to-left, y: height of the flames, s: scale}
 export function drawGust(cr, W, H, g) {
     const k = g.k ?? 0;
     if (k < 0.01)
@@ -737,19 +747,21 @@ export function drawGust(cr, W, H, g) {
     for (const st of STREAKS) {
         const len = st.len * s;
         const span = W + len + 120 * s;
-        const head = ((g.t * st.speed * v + st.off * span) % span) - 40 * s;
+        const head = (((g.d ?? g.t) * st.speed * v + st.off * span) % span) - 40 * s;
         const tail = head - len;
         if (head < 0 || tail > W)
             continue;
         const y0 = st.near ? g.y + st.y * 60 * s : 30 * s + st.y * (H - 60 * s);
-        // away from the lamp the air is fainter, so the screen stays readable
-        const a = k * (st.near ? 1 : 0.6);
+        // the air comes in patches; away from the lamp it is fainter, so the screen
+        // stays readable
+        const p = airPatch((head + tail) / 2, y0, g.d ?? g.t, s);
+        const a = k * (st.near ? 0.5 + 0.5 * p : 0.85 * p);
         const pts = [];
         for (let j = 0; j <= 20; j++) {
             const x = tail + (len * j) / 20;
             pts.push([x, y0 + st.amp * s * Math.sin(x * 0.045 / s + st.ph + g.t * 4)]);
         }
-        const lw = st.lw * s;
+        const lw = st.lw * s * (0.65 + 0.6 * p);
         const draw = (col, alpha, width, dy) => {
             cr.newPath();
             pts.forEach(([x, y], j) => (j ? cr.lineTo(x, y + dy) : cr.moveTo(x, y + dy)));
@@ -799,7 +811,10 @@ export const DOUBLE_MS = 300;   // a second click within this long is a double-c
 
 // Double-click the lamp: a few small rockets rise from the bottom of the screen and
 // open into soft blooms of sparks that drift down and fade. Kept small and gentle.
-// Positions are screen px; `play(name)` plays a sound.
+// A relight rocket bursts just above the lamp instead and drops one glowing spark onto
+// each wick; the wick catches when its spark lands.
+// Positions are screen px; `play(name)` plays a sound. For relighting, set
+// `lamp()` -> {x, y, wicks: [{x, y}]} (live, the lamp swings) and `onWick(i)`.
 export class Crackers {
     constructor(play) {
         this.play = play;
@@ -807,40 +822,84 @@ export class Crackers {
         this.rockets = [];
         this.sparks = [];
         this.glows = [];
+        this.seeds = [];
+        this.lamp = null;
+        this.onWick = null;
     }
 
     get active() {
-        return this.queue.length + this.rockets.length + this.sparks.length + this.glows.length > 0;
+        return this.queue.length + this.rockets.length + this.sparks.length + this.glows.length +
+            this.seeds.length > 0;
     }
 
-    // W x H: the screen; s: scale. Returns false while a show is still going up.
-    launch(now, W, H, s) {
-        if (this.queue.length || this.rockets.length)
-            return false;
+    // a relight rocket is on its way (queued, climbing, or its sparks still falling)
+    get relighting() {
+        return this.queue.some(q => q.relight) || this.rockets.some(r => r.relight) || this.seeds.length > 0;
+    }
+
+    _screen(W, H, s) {
         this.W = W;
         this.H = H;
         this.s = s;
-        const n = Math.random() < 0.5 ? 3 : 4;
+    }
+
+    // one rocket that bursts over the lamp and lights its wicks. Returns false if it
+    // can't (no lamp to aim at).
+    relight(now, W, H, s) {
+        if (!this.lamp || !this.onWick)
+            return false;
+        if (this.relighting)
+            return true;
+        this._screen(W, H, s);
+        this.queue.push({at: now, relight: true});
+        this.queue.sort((a, b) => a.at - b.at);
+        return true;
+    }
+
+    // W x H: the screen; s: scale. Returns false while a show is still going up.
+    // relight: the lamp is dark, so the finale's last rocket lights it again
+    launch(now, W, H, s, relight = false) {
+        if (this.queue.length || this.rockets.length)
+            return false;
+        this._screen(W, H, s);
+        // the whole show lasts 5-8 s: rockets go up for all but the last ~3 s,
+        // which the final ones need to climb, open and fade
+        const show = rand(5, 8);
+        const window = show - 2.9;
+        const n = 6 + Math.round(window * 1.6);
         // spread them across the screen, in a random order
-        const xs = Array.from({length: n}, (_, i) => (i + 0.5) / n + rand(-0.07, 0.07));
+        const xs = Array.from({length: n}, (_, i) => (i + 0.5) / n + rand(-0.05, 0.05));
         xs.sort(() => Math.random() - 0.5);
-        let at = now;
-        for (const fx of xs) {
-            this.queue.push({at, fx: clamp(fx, 0.08, 0.92)});
-            at += rand(0.35, 0.75);
-        }
+        // launch times scattered over the window, the last three close together as a finale
+        const ats = [0, ...Array.from({length: n - 4}, () => rand(0, window * 0.85)),
+            window * 0.88, window * 0.94, window].sort((p, q) => p - q);
+        xs.forEach((fx, i) => this.queue.push({at: now + ats[i], fx: clamp(fx, 0.06, 0.94), last: i >= n - 3,
+            relight: relight && i === n - 1 && !!this.lamp && !!this.onWick}));
         return true;
     }
 
     tick(now, dt) {
         const {W, H, s} = this;
         while (this.queue.length && this.queue[0].at <= now) {
-            const {fx} = this.queue.shift();
+            const {fx, last, relight} = this.queue.shift();
+            if (relight) {
+                // climb from below the lamp to just above it
+                const lp = this.lamp();
+                const x1 = clamp(lp.x, 30 * s, W - 30 * s);
+                const x0 = clamp(x1 + rand(-140, 140) * s, 20 * s, W - 20 * s);
+                this.rockets.push({
+                    x0, y0: H + 10 * s, x1, y1: Math.max(40 * s, lp.y - 140 * s),
+                    x: x0, y: H + 10 * s, t: 0, dur: 1.25, trail: [], relight: true,
+                });
+                this.play(`whoosh-${Math.floor(Math.random() * 2)}`);
+                continue;
+            }
             const x0 = fx * W;
             this.rockets.push({
                 x0, y0: H + 10 * s, x1: x0 + rand(-50, 50) * s, y1: H * rand(0.16, 0.42),
                 x: x0, y: H + 10 * s, t: 0, dur: rand(1.0, 1.35), trail: [],
-                willow: Math.random() < 0.3,
+                // the finale skips the slow willows so the show ends on time
+                willow: !last && Math.random() < 0.3,
             });
             this.play(`whoosh-${Math.floor(Math.random() * 2)}`);
         }
@@ -855,9 +914,13 @@ export class Crackers {
                 r.trail.shift();
             if (u < 1)
                 return true;
-            this._burst(r);
+            if (r.relight)
+                this._relightBurst(r);
+            else
+                this._burst(r);
             return false;
         });
+        this._tickSeeds(dt);
         this.sparks = this.sparks.filter(p => {
             p.age += dt;
             const drag = Math.exp(-p.drag * dt);
@@ -868,6 +931,54 @@ export class Crackers {
             return p.age < p.life;
         });
         this.glows = this.glows.filter(g => (g.age += dt) < 0.6);
+    }
+
+    // a small golden bloom, and one bright spark falling onto each wick in turn
+    _relightBurst(r) {
+        const s = this.s;
+        const cols = BURSTS[0];
+        for (let i = 0; i < 36; i++) {
+            const ang = (i / 36) * Math.PI * 2 + rand(-0.1, 0.1);
+            const sp = rand(110, 150) * s;
+            this.sparks.push({
+                x: r.x, y: r.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+                age: 0, life: rand(1.4, 2.0), drag: 1.6, grav: 60 * s,
+                col: pick(cols), w: 1.3 * s, tw: rand(0, 6.28),
+            });
+        }
+        this.glows.push({x: r.x, y: r.y, age: 0, col: cols[0]});
+        this.play(`pop-${Math.floor(Math.random() * 3)}`);
+        // sweep across the lamp from one side, like the sparks are drifting over it
+        const wicks = this.lamp().wicks.map((w, i) => [w.x, i]);
+        const side = Math.random() < 0.5 ? 1 : -1;
+        wicks.sort((a, b) => (a[0] - b[0]) * side);
+        wicks.forEach(([, i], k) => this.seeds.push({
+            i, x0: r.x, y0: r.y, x: r.x, y: r.y, t: 0, dur: 0.55 + k * 0.3,
+            bulge: rand(25, 45) * s * (Math.random() < 0.5 ? -1 : 1), trail: [],
+        }));
+    }
+
+    // falling sparks home in on their wick (wherever the swinging lamp has taken it)
+    _tickSeeds(dt) {
+        if (!this.seeds.length)
+            return;
+        const wicks = this.lamp().wicks;
+        this.seeds = this.seeds.filter(p => {
+            p.t += dt;
+            const u = Math.min(1, p.t / p.dur);
+            const w = wicks[p.i];
+            // drifts out sideways first, then drops faster and faster onto the wick
+            p.x = p.x0 + (w.x - p.x0) * smooth(u) + p.bulge * Math.sin(Math.PI * u);
+            p.y = p.y0 + (w.y - p.y0) * u ** 1.7;
+            p.trail.push([p.x, p.y]);
+            if (p.trail.length > 10)
+                p.trail.shift();
+            if (u < 1)
+                return true;
+            this.onWick(p.i);
+            this.glows.push({x: w.x, y: w.y, age: 0, col: '#ffd27a', r: 34});
+            return false;
+        });
     }
 
     _burst(r) {
@@ -896,8 +1007,8 @@ export class Crackers {
         cr.save();
         cr.setLineCap(Cairo.LineCap.ROUND);
         for (const g of this.glows) {
-            const a = 0.22 * (1 - g.age / 0.6);
-            const r = 80 * s;
+            const a = 0.22 * (1 - g.age / 0.6) * (g.r ? 1.6 : 1);
+            const r = (g.r ?? 80) * s;
             const grad = new Cairo.RadialGradient(g.x, g.y, 0, g.x, g.y, r);
             stop(grad, 0, g.col, a);
             stop(grad, 1, g.col, 0);
@@ -920,6 +1031,28 @@ export class Crackers {
             cr.newPath();
             cr.arc(r.x, r.y, 1.6 * s, 0, Math.PI * 2);
             rgba(cr, '#fff4d6', 0.85);
+            cr.fill();
+        }
+        for (const p of this.seeds) {
+            const tr = p.trail;
+            for (let i = 1; i < tr.length; i++) {
+                cr.newPath();
+                cr.moveTo(tr[i - 1][0], tr[i - 1][1]);
+                cr.lineTo(tr[i][0], tr[i][1]);
+                rgba(cr, '#ffd27a', 0.7 * (i / tr.length));
+                cr.setLineWidth(1.6 * s);
+                cr.stroke();
+            }
+            const grad = new Cairo.RadialGradient(p.x, p.y, 0, p.x, p.y, 9 * s);
+            stop(grad, 0, '#ffe2a8', 0.55);
+            stop(grad, 1, '#ffb347', 0);
+            cr.setSource(grad);
+            cr.newPath();
+            cr.arc(p.x, p.y, 9 * s, 0, Math.PI * 2);
+            cr.fill();
+            cr.newPath();
+            cr.arc(p.x, p.y, 2 * s, 0, Math.PI * 2);
+            rgba(cr, '#fff6dc', 0.95);
             cr.fill();
         }
         for (const p of this.sparks) {
@@ -1254,7 +1387,7 @@ export class Sounds {
 
 export const HOLD_MS = 700;   // press and hold this long to blow the flames out
 export const DARK_S = 4;      // seconds the lamp stays dark before it starts to relight
-const BLOW_S = 2.6;           // how long the gust lasts
+const BLOW_S = 3.2;           // how long the wind blows, in puffs
 const RELIGHT_GAP = 0.85;     // seconds between one wick catching and the next
 const EMBER_S = 0.7;          // a wick glows this long before its flame appears
 const GROW_S = 1.8;           // and the flame takes this long to grow to full size
@@ -1272,14 +1405,40 @@ export class Lights {
         this.dir = 1;
         this.wind = 0;
         this.windT = 0;
+        this.windD = 0;
+        this.puffs = [];
         this.levels = xs.map(() => 1);
         this.smoke = xs.map(() => 0);
         this.ember = xs.map(() => 0);
         this.rank = xs.map((_, i) => i);
+        this.lightAt = xs.map(() => Infinity);   // when each wick starts to glow (s)
+        // called when the dark pause ends; returns true if it sends a rocket to relight
+        // the lamp (sparks then call lightWick), false to relight on its own
+        this.onDark = null;
     }
 
     get lit() {
         return this.state === 'lit';
+    }
+
+    // blown out and waiting to be lit again
+    get dark() {
+        return this.state === 'out' || this.state === 'waiting';
+    }
+
+    _startLighting(now) {
+        this.state = 'lighting';
+        this.t0 = now;
+        this.started = this.levels.map(() => false);
+        this.lightAt = this.levels.map(() => Infinity);
+    }
+
+    // a spark has landed on wick i: it glows straight away and catches
+    lightWick(i, now) {
+        if (this.dark)
+            this._startLighting(now);
+        if (this.state === 'lighting' && !this.started[i])
+            this.lightAt[i] = Math.min(this.lightAt[i], now - EMBER_S * 0.7);
     }
 
     // average brightness, for the glow
@@ -1294,7 +1453,7 @@ export class Lights {
 
     // what drawGust needs; the air streams the way the flames lean
     get gust() {
-        return {k: this.wind, t: this.windT, dir: -this.dir};
+        return {k: this.wind, t: this.windT, d: this.windD, dir: -this.dir};
     }
 
     blowOut(now) {
@@ -1307,8 +1466,26 @@ export class Lights {
         order.forEach(([, i], r) => {
             this.rank[i] = r;
         });
+        // the wind comes in puffs: a strong first one, then a few more of random
+        // strength with lulls between
+        this.puffs = [{at: 0.35, peak: 0.85, w: 0.28}];
+        for (let at = rand(0.85, 1.05); at < BLOW_S - 0.5; at += rand(0.45, 0.75))
+            this.puffs.push({at, peak: rand(0.5, 1), w: rand(0.14, 0.26)});
+        this.windD = 0;
+        this.blown = this.levels.map(() => 0);
+        this.goneAt = this.levels.map(() => -1);
         this.play('blow');
         return true;
+    }
+
+    // wind strength t seconds into the blow: puffs over a faint steady breeze
+    _windAt(t) {
+        let puff = 0;
+        for (const p of this.puffs)
+            puff = Math.max(puff, p.peak * Math.exp(-(((t - p.at) / p.w) ** 2)));
+        const flutter = 0.07 * Math.sin(t * 13.7) + 0.05 * Math.sin(t * 23.1 + 1);
+        const env = smooth(t / 0.15) * (1 - smooth((t - (BLOW_S - 0.6)) / 0.6));
+        return env * clamp(0.16 + puff * 0.9 + flutter, 0, 1);
     }
 
     tick(now, dt) {
@@ -1320,16 +1497,28 @@ export class Lights {
         }
         if (this.state === 'blowing') {
             this.windT = t;
-            this.wind = smooth(t / 0.4) * (1 - smooth((t - 1.8) / (BLOW_S - 1.8)));
+            this.wind = this._windAt(t);
+            // the air rushes in the puffs and drifts in the lulls
+            this.windD += dt * (0.3 + 0.95 * this.wind);
             for (let i = 0; i < this.levels.length; i++) {
-                const off = 0.75 + this.rank[i] * 0.16;
-                const lv = clamp(1 - (t - off) / 0.3, 0, 1);
+                // a flame only loses ground in the strong puffs; upwind ones give up first
+                this.blown[i] += dt * Math.max(0, this.wind - 0.4);
+                const need = 0.08 + this.rank[i] * 0.07;
+                if (this.goneAt[i] < 0 && (this.blown[i] > need || t > BLOW_S - 0.5))
+                    this.goneAt[i] = t;
+                let lv;
+                if (this.goneAt[i] >= 0) {
+                    lv = clamp(1 - (t - this.goneAt[i]) / 0.2, 0, 1);
+                } else {
+                    // shrink and sputter as it fights the wind, recover in the lulls
+                    const f = this.blown[i] / need;
+                    lv = 1 - 0.3 * f * f - 0.25 * this.wind * (0.5 + 0.5 * Math.sin(t * 55 + i));
+                }
                 if (lv === 0 && this.levels[i] > 0) {
                     this.smoke[i] = 1;
                     this.ember[i] = 1;
                 }
-                // shrink and sputter as it fights the wind
-                this.levels[i] = lv > 0 && lv < 1 ? lv * (0.75 + 0.25 * Math.sin(t * 55 + i)) : lv;
+                this.levels[i] = lv;
             }
             if (t > BLOW_S) {
                 this.state = 'out';
@@ -1338,15 +1527,21 @@ export class Lights {
             }
         } else if (this.state === 'out') {
             if (t > DARK_S) {
-                this.state = 'lighting';
-                this.t0 = now;
-                this.started = this.levels.map(() => false);
+                if (this.onDark?.(now)) {
+                    this.state = 'waiting';
+                    this.t0 = now;
+                } else {
+                    this._relightAlone(now);
+                }
             }
+        } else if (this.state === 'waiting') {
+            // the rocket never came (say the screen went away): light up anyway
+            if (t > 6)
+                this._relightAlone(now);
         } else if (this.state === 'lighting') {
             let done = true;
             for (let i = 0; i < this.levels.length; i++) {
-                // the far end of the gust relights first, so it spreads back across
-                const on = (this.levels.length - 1 - this.rank[i]) * RELIGHT_GAP;
+                const on = this.lightAt[i] - this.t0;
                 const e = (t - on) / EMBER_S;
                 const x = (t - on - EMBER_S) / GROW_S;
                 this.ember[i] = Math.max(this.ember[i], smooth(e) * (1 - smooth(x * 2)));
@@ -1366,5 +1561,11 @@ export class Lights {
             if (done)
                 this.state = 'lit';
         }
+    }
+
+    // no rocket: the far end of the gust relights first, so it spreads back across
+    _relightAlone(now) {
+        this._startLighting(now);
+        this.lightAt = this.rank.map(r => now + (this.levels.length - 1 - r) * RELIGHT_GAP);
     }
 }
