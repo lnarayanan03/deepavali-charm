@@ -1302,7 +1302,6 @@ export function drawSky(cr, w, h, sky) {
     cr.save();
     cr.scale(w / sky.W, h / sky.H);
     drawGust(cr, sky.W, sky.H, sky.gust);
-    sky.dragon?.draw(cr);
     sky.crackers.draw(cr);
     cr.restore();
 }

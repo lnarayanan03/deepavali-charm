@@ -25,12 +25,8 @@ import {
     isBack, drawOilDrop, Spill, spoutWorld, dropStart, DROP_GRAVITY, Sounds, Lights, HOLD_MS,
     drawSky, Crackers, DOUBLE_MS,
 } from './draw.js';
-import {
-    useCairo as useDragonCairo, DragonBalls, drawBall, BALL_R, BALL_SPRITE, VOICES,
-} from './dragon.js';
 
 useCairo(Cairo);
-useDragonCairo(Cairo);
 
 const CONFIG = GLib.build_filenamev([GLib.get_user_config_dir(), 'deepavali-charm.json']);
 
@@ -65,7 +61,6 @@ export default class DeepavaliCharm extends Extension {
         this._lenV = 0;
         this._flare = 0;
 
-        this._dragon = new DragonBalls(name => this._playSound(name));
         this._buildActors();
         this._lights = new Lights(this._flames.map(f => f.tx), name => this._playSound(name));
         this._crackers = new Crackers(name => this._playSound(name));
@@ -134,9 +129,6 @@ export default class DeepavaliCharm extends Extension {
         this._hook = null;
         this._sky?.destroy();
         this._sky = null;
-        for (const a of this._balls ?? [])
-            a.destroy();
-        this._balls = [];
         this._root?.destroy();
         this._root = null;
         this._vptr = null;
@@ -231,28 +223,7 @@ export default class DeepavaliCharm extends Extension {
         this._sky = new St.DrawingArea({reactive: false, visible: false});
         this._sky.connect('repaint', paint(drawSky, this._skyState()));
 
-        // the seven dragon balls, each its own small picture you can drag about
-        const bs = Math.round(BALL_SPRITE * BALL_R * s);
-        this._balls = this._dragon.balls.map((b, i) => {
-            const a = new St.DrawingArea({width: bs, height: bs, reactive: true, visible: false});
-            a.connect('repaint', paint(drawBall, b));
-            a.connect('button-press-event', (_a, ev) => this._onBallPress(ev, i, a));
-            a.connect('motion-event', (_a, ev) => this._onBallMotion(ev));
-            a.connect('button-release-event', () => this._onBallRelease());
-            a.connect('enter-event', () => {
-                if (this._dragon.idle)
-                    global.display.set_cursor(Meta.Cursor.POINTING_HAND);
-            });
-            a.connect('leave-event', () => {
-                if (!this._ballDrag)
-                    global.display.set_cursor(Meta.Cursor.DEFAULT);
-            });
-            return a;
-        });
-
         Main.layoutManager.addChrome(this._root, {trackFullscreen: true});
-        for (const a of this._balls)
-            Main.layoutManager.addChrome(a, {affectsInputRegion: true, trackFullscreen: true});
         Main.layoutManager.uiGroup.add_child(this._sky);
         Main.layoutManager.addChrome(this._hook, {affectsInputRegion: true, trackFullscreen: true});
         this._layoutLength();
@@ -308,8 +279,6 @@ export default class DeepavaliCharm extends Extension {
         this._sky.set_scale(1 / q, 1 / q);
         this._sky.set_position(mon.x, mon.y);
         this._hook.set_position(this._ax - 12 * s, this._ay - 3 * s);
-        this._dragon.avoid = {x: this._ax - mon.x, w: 130 * s};
-        this._dragon.screen(mon.width, mon.height, s, this._now());
         this._apply();
     }
 
@@ -434,9 +403,8 @@ export default class DeepavaliCharm extends Extension {
         this._glow.scale_x = this._glow.scale_y = 1 + 0.05 * g + 0.12 * this._flare;
 
         this._crackers.tick(this._now(), dt);
-        this._stepBalls(dt);
         const sky = this._sky;
-        sky.visible = lights.wind > 0 || this._crackers.active || this._dragon.showing;
+        sky.visible = lights.wind > 0 || this._crackers.active;
         if (sky.visible) {
             sky.get_parent()?.set_child_above_sibling(sky, null);
             sky.queue_repaint();
@@ -460,65 +428,7 @@ export default class DeepavaliCharm extends Extension {
             get crackers() {
                 return self._crackers;
             },
-            get dragon() {
-                return self._dragon;
-            },
         };
-    }
-
-    // ----- dragon balls -----
-
-    _stepBalls(dt) {
-        const dr = this._dragon, m = this._mon;
-        dr.tick(this._now(), dt);
-        if (!m)
-            return;
-        const show = dr.resting;
-        this._balls.forEach((a, i) => {
-            const b = dr.balls[i];
-            a.visible = show && !b.hidden;
-            if (!a.visible)
-                return;
-            a.reactive = dr.idle;
-            a.set_position(Math.round(m.x + b.x - a.width / 2), Math.round(m.y + b.y - a.height / 2));
-            const key = `${b.lit.toFixed(2)} ${b.stone.toFixed(2)}`;
-            if (key !== a._key) {
-                a._key = key;
-                a.queue_repaint();
-            }
-        });
-    }
-
-    _onBallPress(ev, i, actor) {
-        if (ev.get_button() !== 1 || !this._dragon.idle)
-            return Clutter.EVENT_PROPAGATE;
-        const [x, y] = ev.get_coords();
-        this._dragon.grab(i, x - this._mon.x, y - this._mon.y);
-        this._ballDrag = true;
-        this._endGrab();
-        this._grab = global.stage.grab(actor);
-        global.display.set_cursor(Meta.Cursor.MOVE_OR_RESIZE_WINDOW);
-        // the one you're holding sits on top
-        actor.get_parent()?.set_child_above_sibling(actor, null);
-        return Clutter.EVENT_STOP;
-    }
-
-    _onBallMotion(ev) {
-        if (!this._ballDrag)
-            return Clutter.EVENT_PROPAGATE;
-        const [x, y] = ev.get_coords();
-        this._dragon.drag(x - this._mon.x, y - this._mon.y);
-        return Clutter.EVENT_STOP;
-    }
-
-    _onBallRelease() {
-        if (!this._ballDrag)
-            return Clutter.EVENT_PROPAGATE;
-        this._ballDrag = false;
-        this._endGrab();
-        global.display.set_cursor(Meta.Cursor.DEFAULT);
-        this._dragon.drop(this._now());
-        return Clutter.EVENT_STOP;
     }
 
     // double-click: a few rockets go up across the screen
@@ -692,18 +602,7 @@ export default class DeepavaliCharm extends Extension {
     // ----- sound -----
 
     _playSound(name) {
-        let dir = 'sounds';
-        if (name in VOICES) {
-            // your own voice clip if you've added one, otherwise a stand-in sound
-            const own = GLib.build_filenamev([this.path, 'voices', `${name}.wav`]);
-            if (GLib.file_test(own, GLib.FileTest.EXISTS))
-                dir = 'voices';
-            else if (VOICES[name])
-                name = VOICES[name];
-            else
-                return;
-        }
-        const file = Gio.File.new_for_path(GLib.build_filenamev([this.path, dir, `${name}.wav`]));
+        const file = Gio.File.new_for_path(GLib.build_filenamev([this.path, 'sounds', `${name}.wav`]));
         try {
             global.display.get_sound_player().play_from_file(file, 'Deepavali charm', null);
         } catch (e) {
@@ -971,52 +870,6 @@ export default class DeepavaliCharm extends Extension {
         at(48.0, () => console.log(`deepavali-charm test dark_show: queued=${this._crackers.queue.length} ` +
             `relighting=${this._crackers.relighting} lights=${this._lights.state}`), 'dark_show');
         at(55.9, () => log('relit_by_finale'), 'relit_by_finale');
-
-        // dragon balls: drag six of them onto the first; when all seven touch, the show
-        const dr = this._dragon, m = this._mon, R = dr.radius;
-        const dlog = tag => console.log(`deepavali-charm test ${tag}: dragon=${dr.state} ` +
-            `balls=${dr.balls.map(b => `${Math.round(b.x)},${Math.round(b.y)}`).join(' ')}`);
-        at(58.0, () => dlog('balls'), 'balls');
-        for (let j = 1; j < 7; j++) {
-            const t0 = 58.2 + (j - 1) * 0.8;
-            const ang = ((j - 1) / 6) * Math.PI * 2;
-            at(t0, () => {
-                const b = dr.balls[j];
-                px = m.x + b.x;
-                py = m.y + b.y;
-                move(px, py);
-            });
-            at(t0 + 0.08, () => button(true));
-            at(t0 + 0.12, () => {
-                // glide to a spot touching the first ball
-                const c = dr.balls[0];
-                const tx = m.x + c.x + Math.cos(ang) * R * 2.1, ty = m.y + c.y + Math.sin(ang) * R * 2.1;
-                const sx = px, sy = py;
-                for (let k = 1; k <= 10; k++) {
-                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, k * 30, () => {
-                        px = sx + ((tx - sx) * k) / 10;
-                        py = sy + ((ty - sy) * k) / 10;
-                        move(px, py);
-                        return GLib.SOURCE_REMOVE;
-                    });
-                }
-            });
-            at(t0 + 0.6, () => button(false));
-        }
-        at(62.6, () => dlog('gathered'), 'gathered');
-        const show = 62.4;   // about when the last one lands
-        for (const [dt, name] of [[0.6, 'db_storm'], [1.3, 'db_zap'], [2.3, 'db_pillar'], [4.0, 'db_rising'],
-            [5.8, 'db_stare'], [7.2, 'db_vanish'], [9.2, 'db_run'], [11.5, 'db_ssj'], [13.6, 'db_charge'],
-            [15.0, 'db_fire'], [16.0, 'db_teleported'], [17.2, 'db_catch'], [19.6, 'db_salute'], [20.7, 'db_bye']])
-            at(show + dt, () => dlog(name), name);
-        at(show + 25.0, () => dlog('stones'), 'stones');
-        // skip the minute's wait: the colour comes back and they can be used again
-        at(show + 25.2, () => {
-            dr.until = this._now();
-        });
-        at(show + 26.0, () => dlog('waking'), 'waking');
-        at(show + 27.6, () => console.log(`deepavali-charm test awake: dragon=${dr.state} ` +
-            `stone=${dr.balls[0].stone} hit=${dr.hit(dr.balls[0].x, dr.balls[0].y)}`), 'awake');
 
         const t0 = GLib.get_monotonic_time() / 1e6;
         let i = 0;

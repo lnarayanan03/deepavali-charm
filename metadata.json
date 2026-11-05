@@ -1,7 +1,7 @@
 {
   "uuid": "deepavali-charm@ranga",
   "name": "Deepavali Charm",
-  "description": "A brass hanging lamp with five oil flames on a marigold and jasmine garland, hung from the top bar. Drag to swing or stretch it (it springs back), Ctrl+drag to set the length, click for petals, press and hold to blow the flames out, double-click for a Happy Diwali crackers show. Plus seven dragon balls to gather and summon the dragon.",
+  "description": "A brass hanging lamp with five oil flames on a marigold and jasmine garland, hung from the top bar. Drag to swing or stretch it (it springs back), Ctrl+drag to set the length, click for petals, press and hold to blow the flames out, double-click for a Happy Diwali crackers show.",
   "shell-version": [
     "45",
     "46",

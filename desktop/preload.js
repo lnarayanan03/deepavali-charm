@@ -4,7 +4,6 @@ const {contextBridge, ipcRenderer} = require('electron');
 contextBridge.exposeInMainWorld('charm', {
     setInteractive: on => ipcRenderer.send('interactive', on),
     loadSettings: () => ipcRenderer.invoke('load-settings'),
-    loadVoices: () => ipcRenderer.invoke('load-voices'),
     saveSettings: s => ipcRenderer.send('save-settings', s),
     onCommand: fn => ipcRenderer.on('command', (_e, c) => fn(c)),
     onResized: fn => ipcRenderer.on('resized', (_e, size) => fn(size)),
